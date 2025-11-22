@@ -129,4 +129,5 @@ class ModelWeightAveraging:
         return False, None
 
     def _get_averaging_snapshots_dict(self):
-        return torch.load(self.averaging_snapshots_file, map_location="cpu")
+        # Snapshot file is generated locally by torch.save (tensors + numpy arrays), safe to load with weights_only=False.
+        return torch.load(self.averaging_snapshots_file, map_location="cpu", weights_only=False)

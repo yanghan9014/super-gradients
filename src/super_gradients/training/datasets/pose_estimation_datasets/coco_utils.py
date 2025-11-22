@@ -4,7 +4,7 @@ import numbers
 import os
 import pprint
 from enum import Enum
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 import cv2
 import numpy as np
@@ -14,7 +14,7 @@ from super_gradients.training.datasets.data_formats.bbox_formats.xywh import xyw
 
 logger = get_logger(__name__)
 
-__all__ = ["CrowdAnnotationActionEnum", "KeypointsAnnotation", "parse_coco_into_keypoints_annotations"]
+__all__ = ["CrowdAnnotationActionEnum", "KeypointsAnnotation", "parse_coco_into_keypoints_annotations", "parse_coco_into_multiclass_keypoints_annotations"]
 
 
 class CrowdAnnotationActionEnum(str, Enum):
@@ -36,10 +36,11 @@ class KeypointsAnnotation:
     image_height: int
 
     ann_boxes_xyxy: np.ndarray
-    ann_is_crowd: np.ndarray
+    # ann_is_crowd: np.ndarray
     ann_areas: np.ndarray
     ann_keypoints: np.ndarray
-    ann_segmentations: np.ndarray
+    # ann_segmentations: np.ndarray
+    ann_class_labels: Optional[np.ndarray] = None
 
 
 def parse_coco_into_keypoints_annotations(
@@ -116,6 +117,7 @@ def parse_coco_into_keypoints_annotations(
             ann_areas=ann_areas[mask],
             ann_keypoints=ann_keypoints[mask],
             ann_segmentations=ann_segmentations[mask],
+            ann_class_labels=None,
         )
 
         if remove_duplicate_annotations:
@@ -144,6 +146,111 @@ def parse_coco_into_keypoints_annotations(
         annotations.append(ann)
 
     return category_name, keypoints, annotations
+
+def parse_coco_into_multiclass_keypoints_annotations(
+    ann: str,
+    image_path_prefix=None,
+    # crowd_annotations_action=CrowdAnnotationActionEnum.NO_ACTION,
+    remove_duplicate_annotations: bool = False,
+) -> Tuple[str, Dict, List[KeypointsAnnotation]]:
+    """
+    Load COCO keypoints dataset from annotation file. Support multi-class annotations
+    :param ann: A path to the JSON annotation file in COCO format.
+    :param image_path_prefix:   A prefix to add to the image paths in the annotation file.
+    :return:                    Tuple (class_names, annotations) where class_names is a list of class names
+                                (respecting include_classes/exclude_classes/class_ids_to_ignore) and
+                                annotations is a list of DetectionAnnotation objects.
+    """
+    with open(ann, "r") as f:
+        coco = json.load(f)
+
+    # # Allows multi class
+    # if len(coco["categories"]) != 1:
+    #     raise ValueError("Dataset must contain exactly one category")
+
+    # Extract class names and keypoint schema (all categories must share the same schema and order)
+    category_names = [ca["name"] for ca in coco["categories"]]
+    category_keypoints = [ca["keypoints"] for ca in coco["categories"]]
+    keypoints_lengths = {len(kps) for kps in category_keypoints}
+    if len(keypoints_lengths) != 1:
+        raise ValueError("All categories must have the same number of keypoints")
+    if any(kps != category_keypoints[0] for kps in category_keypoints[1:]):
+        raise ValueError("All categories must share the same keypoint order")
+
+    keypoints = category_keypoints[0]
+    num_keypoints = len(keypoints)
+    category_id_to_index = {cat["id"]: idx for idx, cat in enumerate(coco["categories"])}
+
+    # Extract box annotations
+    ann_box_xyxy = xywh_to_xyxy_inplace(np.array([annotation["bbox"] for annotation in coco["annotations"]], dtype=np.float32), image_shape=None)
+    ann_keypoints = np.stack([np.array(annotation["keypoints"], dtype=np.float32).reshape(num_keypoints, 3) for annotation in coco["annotations"]])
+
+    ann_image_ids = np.array([annotation["image_id"] for annotation in coco["annotations"]], dtype=int)
+    ann_category_ids = np.array([annotation["category_id"] for annotation in coco["annotations"]], dtype=int)
+
+    # # Chess use-case: we don't use crowd annotations and segmentations; set all to False.
+    # ann_iscrowd = np.zeros(len(coco["annotations"]), dtype=bool)
+    # ann_segmentations = np.zeros(len(coco["annotations"]), dtype=np.object_)
+
+    # We check whether the area is present in the annotations. If it does we use it, otherwise we compute it from the bbox.
+    if "area" in coco["annotations"][0]:
+        ann_areas = np.array([annotation["area"] for annotation in coco["annotations"]], dtype=np.float32)
+    else:
+        # Compute area from box
+        # A multiplier of 0.53 is a heuristic from pycocotools to approximate the area of the pose instance
+        # from the area of the bounding box.
+        ann_areas = np.prod(ann_box_xyxy[:, 2:] - ann_box_xyxy[:, :2], axis=-1) * 0.53
+
+    # Extract image stuff
+    img_ids = np.array([img["id"] for img in coco["images"]], dtype=int)
+    img_paths = np.array([img["file_name"] if "file_name" in img else "{:012}".format(img["id"]) + ".jpg" for img in coco["images"]], dtype=str)
+    img_width_height = np.array([(img["width"], img["height"]) for img in coco["images"]], dtype=int)
+
+    annotations = []
+
+    # Crowd handling is not needed; skip crowd actions
+
+    for img_id, image_path, (image_width, image_height) in zip(img_ids, img_paths, img_width_height):
+        mask = ann_image_ids == img_id
+
+        if image_path_prefix is not None:
+            image_path = os.path.join(image_path_prefix, image_path)
+
+        ann = KeypointsAnnotation(
+            image_id=img_id,
+            image_path=image_path,
+            image_width=image_width,
+            image_height=image_height,
+            ann_boxes_xyxy=ann_box_xyxy[mask],
+            # ann_is_crowd=ann_iscrowd[mask],
+            ann_areas=ann_areas[mask],
+            ann_keypoints=ann_keypoints[mask],
+            # ann_segmentations=ann_segmentations[mask],
+            ann_class_labels=np.array([category_id_to_index[cid] for cid in ann_category_ids[mask]], dtype=int),
+        )
+
+        if remove_duplicate_annotations:
+            joints = ann.ann_keypoints[:, :, :2]
+            gt_joints1 = np.expand_dims(joints, axis=0)  # [1, Num_people, Num_joints, 2]
+            gt_joints2 = np.expand_dims(joints, axis=1)  # [Num_people, 1, Num_joints, 2]
+            diff = np.sqrt(np.sum((gt_joints1 - gt_joints2) ** 2, axis=-1))  # [Num_people, Num_people, Num_joints]
+            diffmean = np.mean(diff, axis=-1)
+
+            duplicate_mask = np.triu(diffmean < 2, k=1)
+            duplicate_indexes_i, duplicate_indexes_j = np.nonzero(duplicate_mask)
+            keep_mask = np.ones(len(ann.ann_boxes_xyxy), dtype=bool)
+            for i, j in zip(duplicate_indexes_i, duplicate_indexes_j):
+                keep_mask[j] = False
+
+            ann.ann_boxes_xyxy = ann.ann_boxes_xyxy[keep_mask]
+            ann.ann_keypoints = ann.ann_keypoints[keep_mask]
+            ann.ann_areas = ann.ann_areas[keep_mask]
+            # ann.ann_segmentations = ann.ann_segmentations[keep_mask]
+            # ann.ann_is_crowd = ann.ann_is_crowd[keep_mask]
+
+        annotations.append(ann)
+
+    return category_names, keypoints, annotations
 
 
 def poly2mask(points: List, image: np.ndarray):

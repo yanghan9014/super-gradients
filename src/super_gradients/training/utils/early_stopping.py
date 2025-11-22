@@ -71,7 +71,7 @@ class EarlyStop(PhaseCallback):
         self.monitor_op = self.mode_dict[self.mode]
         self.min_delta *= 1 if self.monitor_op == torch.gt else -1
 
-        torch_inf = torch.tensor(np.Inf)
+        torch_inf = torch.tensor(np.inf)
         self.best_score = torch_inf if self.monitor_op == torch.lt else -torch_inf
 
     def _get_metric_value(self, metrics_dict):

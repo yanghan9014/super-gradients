@@ -1,0 +1,30 @@
+defaults:
+  - chess_pose_estimation_yolo_nas_dataset_params
+  - _self_
+
+num_classes: 21
+num_joints: 1
+oks_sigmas: [0.05]
+flip_indexes: [0]
+edge_links: []
+edge_colors: []
+keypoint_colors:
+  - [255, 0, 0]
+
+train_dataset_params:
+  data_dir: data/chess_pose
+  images_dir: images/train
+  json_file: annotations/person_keypoints_train.json
+
+val_dataset_params:
+  data_dir: data/chess_pose
+  images_dir: images/val
+  json_file: annotations/person_keypoints_val.json
+
+mosaic_prob: 0.4
+
+train_dataloader_params:
+  batch_size: 16
+
+val_dataloader_params:
+  batch_size: 16

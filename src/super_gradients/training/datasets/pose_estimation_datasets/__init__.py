@@ -5,10 +5,12 @@ from super_gradients.training.datasets.pose_estimation_datasets.yolo_nas_pose_co
 
 from .abstract_pose_estimation_dataset import AbstractPoseEstimationDataset
 from .coco_pose_estimation_dataset import COCOPoseEstimationDataset
+from .chess_pose_estimation_dataset import ChessPoseEstimationDataset
 
 __all__ = [
     "AbstractPoseEstimationDataset",
     "COCOPoseEstimationDataset",
+    "ChessPoseEstimationDataset",
     "COCOKeypointsDataset",
     "BaseKeypointsDataset",
     "KeypointsCollate",

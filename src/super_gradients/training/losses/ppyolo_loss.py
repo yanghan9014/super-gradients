@@ -189,6 +189,8 @@ def check_points_inside_bboxes(points: Tensor, bboxes: Tensor, center_radius_ten
     x, y = points.chunk(2, dim=-1)
     xmin, ymin, xmax, ymax = bboxes.unsqueeze(2).chunk(4, dim=-1)
     # check whether `points` is in `bboxes`
+    import pdb
+    pdb.set_trace()
     left = x - xmin
     top = y - ymin
     right = xmax - x

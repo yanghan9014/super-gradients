@@ -145,8 +145,6 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         """
         assert pred_scores.ndim == pred_bboxes.ndim
         assert gt_labels.ndim == gt_bboxes.ndim and gt_bboxes.ndim == 3
-        import pdb
-        pdb.set_trace()
 
         batch_size, num_anchors, num_classes = pred_scores.shape
         _, _, num_keypoints, _ = pred_pose_coords.shape
@@ -182,6 +180,8 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         batch_ind = torch.arange(end=batch_size, dtype=gt_labels.dtype, device=gt_labels.device).unsqueeze(-1)
         gt_labels_ind = torch.stack([batch_ind.tile([1, num_max_boxes]), gt_labels.squeeze(-1)], dim=-1)
 
+        import pdb
+        pdb.set_trace()
         bbox_cls_scores = pred_scores[gt_labels_ind[..., 0], gt_labels_ind[..., 1]]
 
         # compute alignment metrics, [B, n, L]
@@ -280,8 +280,8 @@ class CIoULoss(nn.Module):
         return loss
 
 
-@register_loss(Losses.YOLONAS_POSE_LOSS)
-class YoloNASPoseLoss(nn.Module):
+@register_loss(Losses.CHESS_YOLONAS_POSE_LOSS)
+class ChessYoloNASPoseLoss(nn.Module):
     """
     Loss for training YoloNASPose model
     """
@@ -297,6 +297,7 @@ class YoloNASPoseLoss(nn.Module):
         pose_cls_loss_weight: float = 1.0,
         pose_reg_loss_weight: float = 1.0,
         pose_classification_loss_type: str = "bce",
+        num_classes: int = 1,
         bbox_assigner_topk: int = 13,
         bbox_assigned_alpha: float = 1.0,
         bbox_assigned_beta: float = 6.0,
@@ -326,7 +327,7 @@ class YoloNASPoseLoss(nn.Module):
 
         self.iou_loss = {"giou": GIoULoss, "ciou": CIoULoss}[regression_iou_loss_type]()
         self.num_keypoints = len(oks_sigmas)
-        self.num_classes = 1  # We have only one class in pose estimation task
+        self.num_classes = num_classes
         self.oks_sigmas = torch.tensor(oks_sigmas)
         self.pose_cls_loss_weight = pose_cls_loss_weight
         self.pose_reg_loss_weight = pose_reg_loss_weight
@@ -347,16 +348,16 @@ class YoloNASPoseLoss(nn.Module):
         Convert targets to PPYoloE-compatible format since it's the easiest (not the cleanest) way to
         have PP Yolo training & metrics computed
 
-        :param targets: Tuple (boxes, joints, crowd)
+        :param targets: Tuple (boxes, joints, class_labels)
                         - boxes: [N, 5] (batch_index, x1, y1, x2, y2)
                         - joints: [N, num_joints, 4] (batch_index, x, y, visibility)
-                        - crowd: [N, 2] (batch_index, is_crowd)
+                        - class_labels: [N, 2] (batch_index, class_id)
         :return:        (Dictionary [str,Tensor]) with keys:
                         - gt_class: (Tensor, int64|int32): Label of gt_bboxes, shape(B, n, 1)
                         - gt_bbox: (Tensor, float32): Ground truth bboxes, shape(B, n, 4) in XYXY format
                         - pad_gt_mask (Tensor, float32): 1 means bbox, 0 means no bbox, shape(B, n, 1)
         """
-        target_boxes, target_joints, target_iscrowd = targets
+        target_boxes, target_joints, target_class_labels = targets
 
         image_index = target_boxes[:, 0]
         gt_bbox = target_boxes[:, 1:5]
@@ -365,7 +366,7 @@ class YoloNASPoseLoss(nn.Module):
         per_image_bbox = []
         per_image_pad_mask = []
         per_image_targets = undo_flat_collate_tensors_with_batch_index(target_joints, batch_size)
-        per_image_crowds = undo_flat_collate_tensors_with_batch_index(target_iscrowd, batch_size)
+        per_image_label_ids = undo_flat_collate_tensors_with_batch_index(target_class_labels, batch_size)
 
         max_boxes = 0
         for i in range(batch_size):
@@ -376,8 +377,7 @@ class YoloNASPoseLoss(nn.Module):
 
             per_image_bbox.append(image_bboxes)
             per_image_pad_mask.append(valid_bboxes)
-            # Since for pose estimation we have only one class, we can just fill it with zeros
-            per_image_class.append(torch.zeros((len(image_bboxes), 1), dtype=torch.long, device=target_boxes.device))
+            per_image_class.append(per_image_label_ids[i].long())
 
             max_boxes = max(max_boxes, mask.sum().item())
 
@@ -392,14 +392,12 @@ class YoloNASPoseLoss(nn.Module):
             per_image_bbox[i] = F.pad(per_image_bbox[i], pad, mode="constant", value=0)
             per_image_pad_mask[i] = F.pad(per_image_pad_mask[i], pad, mode="constant", value=0)
             per_image_targets[i] = F.pad(per_image_targets[i], (0, 0) + pad, mode="constant", value=0)
-            per_image_crowds[i] = F.pad(per_image_crowds[i], pad, mode="constant", value=0)
 
         new_targets = {
             "gt_class": torch.stack(per_image_class, dim=0),
             "gt_bbox": torch.stack(per_image_bbox, dim=0),
             "pad_gt_mask": torch.stack(per_image_pad_mask, dim=0),
             "gt_poses": torch.stack(per_image_targets, dim=0),
-            "gt_crowd": torch.stack(per_image_crowds, dim=0),
         }
         return new_targets
 
@@ -410,10 +408,10 @@ class YoloNASPoseLoss(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         """
         :param outputs: Tuple of pred_scores, pred_distri, anchors, anchor_points, num_anchors_list, stride_tensor
-        :param targets: A tuple of (boxes, joints, crowd) tensors where
+        :param targets: A tuple of (boxes, joints, class_labels) tensors where
                         - boxes: [N, 5] (batch_index, x1, y1, x2, y2)
                         - joints: [N, num_joints, 4] (batch_index, x, y, visibility)
-                        - crowd: [N, 2] (batch_index, is_crowd)
+                        - class_labels: [N, 2] (batch_index, class_id)
         :return:        Tuple of two tensors where first element is main loss for backward and
                         second element is stacked tensor of all individual losses
         """
@@ -438,8 +436,8 @@ class YoloNASPoseLoss(nn.Module):
         gt_labels = targets["gt_class"]
         gt_bboxes = targets["gt_bbox"]
         gt_poses = targets["gt_poses"]
-        gt_crowd = targets["gt_crowd"]
         pad_gt_mask = targets["pad_gt_mask"]
+        gt_crowd = torch.zeros_like(pad_gt_mask, dtype=torch.bool)
 
         # label assignment
         assign_result = self.assigner(
@@ -491,6 +489,8 @@ class YoloNASPoseLoss(nn.Module):
         loss_pose_reg = loss_pose_reg * self.pose_reg_loss_weight
 
         loss = loss_cls + loss_iou + loss_dfl + loss_pose_cls + loss_pose_reg
+        import pdb
+        pdb.set_trace()
         log_losses = torch.stack([loss_cls.detach(), loss_iou.detach(), loss_dfl.detach(), loss_pose_cls.detach(), loss_pose_reg.detach(), loss.detach()])
 
         return loss, log_losses

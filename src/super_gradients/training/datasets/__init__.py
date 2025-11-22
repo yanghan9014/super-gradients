@@ -24,6 +24,7 @@ from super_gradients.training.datasets.pose_estimation_datasets import (
     COCOKeypointsDataset,
     BaseKeypointsDataset,
     COCOPoseEstimationDataset,
+    ChessPoseEstimationDataset,
 )
 
 
@@ -50,6 +51,7 @@ __all__ = [
     "SuperviselyPersonsDataset",
     "COCOKeypointsDataset",
     "COCOPoseEstimationDataset",
+    "ChessPoseEstimationDataset",
 ]
 
 cv2.setNumThreads(0)

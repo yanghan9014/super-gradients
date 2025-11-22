@@ -1545,6 +1545,13 @@ class MissingPretrainedWeightsException(Exception):
         super().__init__(self.message)
 
 
+def _extract_filename_from_url(url: str) -> str:
+    """Return a filesystem-friendly filename for cached pretrained downloads."""
+    known_prefix = "https://sghub.deci.ai/models/"
+    tail = url.split(known_prefix, 1)[1] if known_prefix in url else url.split("://")[-1]
+    return tail.replace("/", "_").replace(" ", "_")
+
+
 def load_pretrained_weights(model: torch.nn.Module, architecture: str, pretrained_weights: str):
     """
     Loads pretrained weights from the MODEL_URLS dictionary to model
@@ -1589,7 +1596,7 @@ def load_pretrained_weights(model: torch.nn.Module, architecture: str, pretraine
     if url.startswith("file://") or os.path.exists(url):
         pretrained_state_dict = torch.load(url.replace("file://", ""), map_location="cpu")
     else:
-        unique_filename = url.split("https://sghub.deci.ai/models/")[1].replace("/", "_").replace(" ", "_")
+        unique_filename = _extract_filename_from_url(url)
         map_location = torch.device("cpu")
         with wait_for_the_master(get_local_rank()):
             pretrained_state_dict = load_state_dict_from_url(url=url, map_location=map_location, file_name=unique_filename)

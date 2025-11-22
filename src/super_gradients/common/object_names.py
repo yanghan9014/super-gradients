@@ -17,6 +17,7 @@ class Losses:
     DEKR_LOSS = "DEKRLoss"
     RESCORING_LOSS = "RescoringLoss"
     YOLONAS_POSE_LOSS = "YoloNASPoseLoss"
+    CHESS_YOLONAS_POSE_LOSS = "chess_yolo_nas_pose_loss"
 
 
 class Metrics:
@@ -437,6 +438,7 @@ class Datasets:
     PASCAL_VOC_AND_AUG_UNIFIED_DATASET = "PascalVOCAndAUGUnifiedDataset"
     COCO_KEY_POINTS_DATASET = "COCOKeypointsDataset"
     COCO_POSE_ESTIMATION_DATASET = "COCOPoseEstimationDataset"
+    CHESS_POSE_ESTIMATION_DATASET = "ChessPoseEstimationDataset"
     NYUV2_DEPTH_ESTIMATION_DATASET = "NYUv2DepthEstimationDataset"
 
 

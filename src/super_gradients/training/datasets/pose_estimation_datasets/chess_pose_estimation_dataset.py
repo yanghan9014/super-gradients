@@ -14,16 +14,18 @@ from super_gradients.training.datasets.pose_estimation_datasets.abstract_pose_es
 from super_gradients.training.datasets.pose_estimation_datasets.coco_utils import (
     CrowdAnnotationActionEnum,
     parse_coco_into_keypoints_annotations,
+    parse_coco_into_multiclass_keypoints_annotations,
     segmentation2mask,
 )
-from super_gradients.training.samples import PoseEstimationSample
+from super_gradients.training.samples import ChessPoseEstimationSample
+# from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.transforms.keypoint_transforms import AbstractKeypointTransform
 
 logger = get_logger(__name__)
 
 
-@register_dataset(Datasets.COCO_POSE_ESTIMATION_DATASET)
-class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
+@register_dataset(Datasets.CHESS_POSE_ESTIMATION_DATASET)
+class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
     """
     Dataset class for training pose estimation models using COCO format dataset.
     Please note that COCO annotations must have exactly one category (e.g. "person") and
@@ -37,7 +39,7 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
     """
 
     @resolve_param("transforms", TransformsFactory())
-    @resolve_param("crowd_annotations_action", TypeFactory.from_enum_cls(CrowdAnnotationActionEnum))
+    # @resolve_param("crowd_annotations_action", TypeFactory.from_enum_cls(CrowdAnnotationActionEnum))
     def __init__(
         self,
         data_dir: str,
@@ -78,11 +80,11 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
         if not os.path.exists(json_file) or not os.path.isfile(json_file):
             raise FileNotFoundError(f"Annotation file {json_file} does not exist")
 
-        self.category_name, self.joints, self.annotations = parse_coco_into_keypoints_annotations(
+        self.category_name, self.joints, self.annotations = parse_coco_into_multiclass_keypoints_annotations(
             json_file,
             image_path_prefix=os.path.join(data_dir, images_dir),
             remove_duplicate_annotations=remove_duplicate_annotations,
-            crowd_annotations_action=crowd_annotations_action,
+            # crowd_annotations_action=crowd_annotations_action,
         )
 
         num_joints = len(self.joints)
@@ -103,11 +105,11 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
         else:
             return len(self.non_empty_annotation_indexes)
 
-    def load_sample(self, index: int) -> PoseEstimationSample:
+    def load_sample(self, index: int) -> ChessPoseEstimationSample:
         """
-        Read a sample from the disk and return a PoseEstimationSample
+        Read a sample from the disk and return a ChessPoseEstimationSample
         :param index: Sample index
-        :return:      Returns an instance of PoseEstimationSample that holds complete sample (image and annotations)
+        :return:      Returns an instance of ChessPoseEstimationSample that holds complete sample (image and annotations)
         """
         if not self.include_empty_samples:
             index = self.non_empty_annotation_indexes[index]
@@ -115,11 +117,12 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
 
         image_shape = (ann.image_height, ann.image_width)
 
-        gt_iscrowd = ann.ann_is_crowd.copy()
+        # gt_iscrowd = ann.ann_is_crowd.copy()
         gt_joints = ann.ann_keypoints.copy()
         gt_bboxes = ann.ann_boxes_xyxy.copy()
-        gt_segmentations = ann.ann_segmentations
+        # gt_segmentations = ann.ann_segmentations
         gt_areas = ann.ann_areas.copy()
+        gt_class_id = ann.ann_class_labels.copy()
 
         orig_image = cv2.imread(ann.image_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if orig_image is None:
@@ -141,26 +144,26 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
         gt_bboxes[:, 3] = np.clip(gt_bboxes[:, 3], 0, image_height)
         gt_bboxes_xywh = xyxy_to_xywh(gt_bboxes, image_shape=(image_height, image_width))
 
-        mask: np.ndarray = self._get_crowd_mask(gt_segmentations[gt_iscrowd], image_shape)
-        import pdb
-        pdb.set_trace()
-        return PoseEstimationSample(
-            image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, bboxes_xywh=gt_bboxes_xywh, is_crowd=gt_iscrowd, additional_samples=None
+        # mask: np.ndarray = self._get_crowd_mask(gt_segmentations[gt_iscrowd], image_shape)
+        mask = np.ones(image_shape, dtype=np.float32)
+
+        return ChessPoseEstimationSample(
+            image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, labels=gt_class_id, bboxes_xywh=gt_bboxes_xywh, additional_samples=None
         )
 
-    def _get_crowd_mask(self, segmentations: List[str], image_shape: Tuple[int, int]) -> np.ndarray:
-        """
-        This method computes ignore mask, which describes crowd objects / objects w/o keypoints to exclude these predictions from contributing to the loss
-        :return: Float mask of [H,W] shape (same as image dimensions),
-            where 1.0 values corresponds to pixels that should contribute to the loss, and 0.0 pixels indicates areas that should be excluded.
-        """
-        m = np.zeros(image_shape, dtype=bool)
+    # def _get_crowd_mask(self, segmentations: List[str], image_shape: Tuple[int, int]) -> np.ndarray:
+    #     """
+    #     This method computes ignore mask, which describes crowd objects / objects w/o keypoints to exclude these predictions from contributing to the loss
+    #     :return: Float mask of [H,W] shape (same as image dimensions),
+    #         where 1.0 values corresponds to pixels that should contribute to the loss, and 0.0 pixels indicates areas that should be excluded.
+    #     """
+    #     m = np.zeros(image_shape, dtype=bool)
 
-        for segmentation in segmentations:
-            mask = segmentation2mask(segmentation, image_shape)
-            m[mask] = True
+    #     for segmentation in segmentations:
+    #         mask = segmentation2mask(segmentation, image_shape)
+    #         m[mask] = True
 
-        return (m < 0.5).astype(np.float32)
+    #     return (m < 0.5).astype(np.float32)
 
     def get_dataset_preprocessing_params(self) -> dict:
         """
