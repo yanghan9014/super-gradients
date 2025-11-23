@@ -321,9 +321,30 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
 @register_model(Models.YOLO_NAS_POSE_N)
 class YoloNASPose_N(YoloNASPose):
     def __init__(self, arch_params: Union[HpmStruct, DictConfig]):
-        default_arch_params = get_arch_params("yolo_nas_pose_n_arch_params")
-        merged_arch_params = HpmStruct(**copy.deepcopy(default_arch_params))
-        merged_arch_params.override(**arch_params.to_dict())
+        # default_arch_params = get_arch_params("yolo_nas_pose_n_arch_params")
+        # merged_arch_params = HpmStruct(**copy.deepcopy(default_arch_params))
+        # merged_arch_params.override(**arch_params.to_dict())
+        
+        if isinstance(arch_params, DictConfig):
+            merged_arch_params = HpmStruct(**arch_params)
+        elif isinstance(arch_params, HpmStruct):
+            merged_arch_params = arch_params
+        else:
+            # Fallback if someone passes a plain dict
+            merged_arch_params = HpmStruct(**arch_params)
+
+        # # If a custom Chess head is present, drop the default YOLO-NAS pose head
+        # heads_cfg = merged_arch_params.heads
+        # try:
+        #     keys = list(heads_cfg.keys())  # HpmStruct behaves like a dict
+        # except AttributeError:
+        #     keys = []
+
+        # if "ChessYoloNASPoseNDFLHeads" in keys and "YoloNASPoseNDFLHeads" in keys:
+        #     heads_cfg.pop("YoloNASPoseNDFLHeads")
+        #     merged_arch_params.heads = heads_cfg
+        # # --------------------------------
+
         super().__init__(
             backbone=merged_arch_params.backbone,
             neck=merged_arch_params.neck,

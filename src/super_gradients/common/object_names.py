@@ -17,7 +17,7 @@ class Losses:
     DEKR_LOSS = "DEKRLoss"
     RESCORING_LOSS = "RescoringLoss"
     YOLONAS_POSE_LOSS = "YoloNASPoseLoss"
-    CHESS_YOLONAS_POSE_LOSS = "chess_yolo_nas_pose_loss"
+    CHESS_YOLONAS_POSE_LOSS = "ChessYoloNASPoseLoss"
 
 
 class Metrics:
@@ -35,6 +35,7 @@ class Metrics:
     BINARY_DICE = "BinaryDice"
     PIXEL_ACCURACY = "PixelAccuracy"
     POSE_ESTIMATION_METRICS = "PoseEstimationMetrics"
+    CHESS_POSE_ESTIMATION_METRICS = "ChessPoseEstimationMetrics"
     DETECTION_METRICS_DISTANCE_BASED = "DetectionMetricsDistanceBased"
     DELTAMETRIC = "DeltaMetric"
     DELTA1 = "Delta1"

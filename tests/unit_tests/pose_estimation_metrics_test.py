@@ -13,8 +13,8 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 from super_gradients.common.abstractions.abstract_logger import get_logger
-from super_gradients.module_interfaces import PoseEstimationPredictions
-from super_gradients.training.metrics.pose_estimation_metrics import PoseEstimationMetrics
+from super_gradients.module_interfaces import PoseEstimationPredictions, ChessPoseEstimationPredictions
+from super_gradients.training.metrics.pose_estimation_metrics import PoseEstimationMetrics, ChessPoseEstimationDataset
 
 logger = get_logger(__name__)
 
@@ -55,20 +55,26 @@ class TestPoseEstimationMetrics(unittest.TestCase):
         ) = self.generate_noised_predictions(gt, instance_drop_probability=0.1, pose_offset=1)
 
         # Compute metrics using SG implementation
-        def convert_predictions_to_target_format(preds) -> List[PoseEstimationPredictions]:
+        def convert_predictions_to_target_format(preds) -> List[ChessPoseEstimationPredictions]:
             # This is out predictions decode function. Here it's no-op since we pass decoded predictions as the input
             # but in real life this post-processing callback should be doing actual pose decoding & NMS
             return [
-                PoseEstimationPredictions(poses=predicted_poses, scores=predicted_scores, bboxes_xyxy=None)
+                ChessPoseEstimationPredictions(poses=predicted_poses, scores=predicted_scores, bboxes_xyxy=None)
                 for predicted_poses, predicted_scores in zip(preds[0], preds[1])
             ]
 
-        sg_metrics = PoseEstimationMetrics(
+        sg_metrics = ChessPoseEstimationMetrics(
             post_prediction_callback=convert_predictions_to_target_format,
             num_joints=17,
             max_objects_per_image=20,
             iou_thresholds_to_report=(0.5, 0.75),
         ).to(device)
+        # sg_metrics = PoseEstimationMetrics(
+        #     post_prediction_callback=convert_predictions_to_target_format,
+        #     num_joints=17,
+        #     max_objects_per_image=20,
+        #     iou_thresholds_to_report=(0.5, 0.75),
+        # ).to(device)
 
         sg_metrics.update(
             preds=(predicted_poses, predicted_scores),
@@ -121,13 +127,20 @@ class TestPoseEstimationMetrics(unittest.TestCase):
             # but in real life this post-processing callback should be doing actual pose decoding & NMS
             return preds
 
-        sg_metrics = PoseEstimationMetrics(
+        sg_metrics = ChessPoseEstimationMetrics(
             post_prediction_callback=convert_predictions_to_target_format,
             num_joints=17,
             max_objects_per_image=20,
             iou_thresholds=None,
             oks_sigmas=None,
         )
+        # sg_metrics = PoseEstimationMetrics(
+        #     post_prediction_callback=convert_predictions_to_target_format,
+        #     num_joints=17,
+        #     max_objects_per_image=20,
+        #     iou_thresholds=None,
+        #     oks_sigmas=None,
+        # )
 
         actual_metrics = sg_metrics.compute()
         pprint(actual_metrics)

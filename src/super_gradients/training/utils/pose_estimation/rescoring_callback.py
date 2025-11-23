@@ -2,7 +2,7 @@ from typing import Tuple, List
 
 from torch import Tensor
 
-from super_gradients.module_interfaces import PoseEstimationPredictions
+from super_gradients.module_interfaces import PoseEstimationPredictions, ChessPoseEstimationPredictions
 
 
 class RescoringPoseEstimationDecodeCallback:
@@ -19,10 +19,10 @@ class RescoringPoseEstimationDecodeCallback:
         super().__init__()
         self.apply_sigmoid = apply_sigmoid
 
-    def __call__(self, predictions: Tuple[Tensor, Tensor]) -> List[PoseEstimationPredictions]:
+    def __call__(self, predictions: Tuple[Tensor, Tensor]) -> List[ChessPoseEstimationPredictions]:
         """ """
         poses, scores = predictions
         if self.apply_sigmoid:
             scores = scores.sigmoid()
 
-        return [PoseEstimationPredictions(poses=poses.cpu().numpy(), scores=scores.squeeze(1).cpu().numpy(), bboxes_xyxy=None)]
+        return [ChessPoseEstimationPredictions(poses=poses.cpu().numpy(), scores=scores.squeeze(1).cpu().numpy(), bboxes_xyxy=None)]

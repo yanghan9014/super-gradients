@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from typing import Tuple, List
 
-from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback, PoseEstimationPredictions
+from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback, PoseEstimationPredictions, ChessPoseEstimationPredictions
 
 
 def get_locations(output_h: int, output_w: int, device):
@@ -294,7 +294,7 @@ class DEKRPoseEstimationDecodeCallback(AbstractPoseEstimationPostPredictionCallb
         self.min_confidence = min_confidence
 
     @torch.no_grad()
-    def __call__(self, predictions: Tuple[Tensor, Tensor]) -> List[PoseEstimationPredictions]:
+    def __call__(self, predictions: Tuple[Tensor, Tensor]) -> List[ChessPoseEstimationPredictions]:
         """
 
         :param predictions: Tuple (heatmap, offset):
@@ -303,14 +303,14 @@ class DEKRPoseEstimationDecodeCallback(AbstractPoseEstimationPostPredictionCallb
 
         :return: Tuple
         """
-        decoded_predictions: List[PoseEstimationPredictions] = []
+        decoded_predictions: List[ChessPoseEstimationPredictions] = []
 
         heatmap, offset = predictions
         batch_size = len(heatmap)
         for i in range(batch_size):
             poses, scores = self.decode_one_sized_batch(predictions=(heatmap[i : i + 1], offset[i : i + 1]))
             decoded_predictions.append(
-                PoseEstimationPredictions(
+                ChessPoseEstimationPredictions(
                     poses=poses[: self.max_num_people],
                     scores=scores[: self.max_num_people],
                     bboxes_xyxy=None,

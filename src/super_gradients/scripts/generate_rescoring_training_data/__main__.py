@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from super_gradients import init_trainer, setup_device
 from super_gradients.training import utils as core_utils, models, dataloaders
-from super_gradients.training.metrics import PoseEstimationMetrics
+from super_gradients.training.metrics import PoseEstimationMetrics, ChessPoseEstimationMetrics
 from super_gradients.training.metrics.pose_estimation_utils import compute_oks
 from super_gradients.training.models.pose_estimation_models.dekr_hrnet import DEKRHorisontalFlipWrapper
 from super_gradients.training.utils import get_param
@@ -26,7 +26,7 @@ def remove_starting_module(key: str):
     return key
 
 
-def process_loader(model, loader, post_prediction_callback, sigmas, metric: Optional[PoseEstimationMetrics] = None):
+def process_loader(model, loader, post_prediction_callback, sigmas, metric: Optional[ChessPoseEstimationMetrics] = None):
     samples = []
     for inputs, targets, extras in tqdm(loader):
         with torch.no_grad(), torch.cuda.amp.autocast(True):
@@ -119,12 +119,18 @@ def main(cfg: DictConfig) -> None:
 
     post_prediction_callback = cfg.post_prediction_callback
 
-    pose_estimation_metric = PoseEstimationMetrics(
+    pose_estimation_metric = ChessPoseEstimationMetrics(
         post_prediction_callback=post_prediction_callback,
         max_objects_per_image=post_prediction_callback.max_num_people,
         num_joints=cfg.dataset_params.num_joints,
         oks_sigmas=cfg.dataset_params.oks_sigmas,
     )
+    # pose_estimation_metric = PoseEstimationMetrics(
+    #     post_prediction_callback=post_prediction_callback,
+    #     max_objects_per_image=post_prediction_callback.max_num_people,
+    #     num_joints=cfg.dataset_params.num_joints,
+    #     oks_sigmas=cfg.dataset_params.oks_sigmas,
+    # )
 
     os.makedirs(cfg.rescoring_data_dir, exist_ok=True)
 

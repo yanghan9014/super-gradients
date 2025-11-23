@@ -6,7 +6,7 @@ from typing import Any, List
 from typing import Union, Optional
 from torch import Tensor
 
-__all__ = ["PoseEstimationPredictions", "AbstractPoseEstimationPostPredictionCallback"]
+__all__ = ["PoseEstimationPredictions", "ChessPoseEstimationPredictions", "AbstractPoseEstimationPostPredictionCallback"]
 
 
 @dataclasses.dataclass
@@ -26,6 +26,23 @@ class PoseEstimationPredictions:
     scores: Union[Tensor, np.ndarray]
     bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
 
+@dataclasses.dataclass
+class ChessPoseEstimationPredictions:
+    """
+    A data class that encapsulates pose estimation predictions for a single image.
+
+    :param poses:        Array of shape [N, K, 3] where N is number of poses and K is number of joints.
+                         Last dimension is [x, y, score] where score the confidence score for the specific joint
+                         with [0..1] range.
+    :param class_scores: Array of shape [N, C] with class scores for each pose with [0..1] range.
+    :param bboxes_xyxy:  Array of shape [N, 4] with bounding boxes for each pose in XYXY format.
+                         Can be None if bounding boxes are not available (for instance, DEKR model does not output boxes).
+    """
+
+    poses: Union[Tensor, np.ndarray]
+    class_scores: Union[Tensor, np.ndarray]
+    bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
+
 
 class AbstractPoseEstimationPostPredictionCallback(abc.ABC):
     """
@@ -33,5 +50,5 @@ class AbstractPoseEstimationPostPredictionCallback(abc.ABC):
     """
 
     @abc.abstractmethod
-    def __call__(self, predictions: Any) -> List[PoseEstimationPredictions]:
+    def __call__(self, predictions: Any) -> List[ChessPoseEstimationPredictions]:
         ...

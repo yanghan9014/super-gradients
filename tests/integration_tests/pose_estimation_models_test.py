@@ -7,7 +7,7 @@ from tqdm import tqdm
 from super_gradients.training import models
 from super_gradients.training.dataloaders.dataloaders import get_data_loader
 from super_gradients.training.datasets.pose_estimation_datasets import COCOKeypointsDataset
-from super_gradients.training.metrics import PoseEstimationMetrics
+from super_gradients.training.metrics import PoseEstimationMetrics, ChessPoseEstimationMetrics
 from super_gradients.training.models.pose_estimation_models.dekr_hrnet import DEKRWrapper, DEKRHorisontalFlipWrapper
 from super_gradients.training.utils import DEKRPoseEstimationDecodeCallback
 from super_gradients.training.utils.pose_estimation import RescoringPoseEstimationDecodeCallback
@@ -38,12 +38,18 @@ class PoseEstimationModelsIntegrationTest(unittest.TestCase):
 
         post_prediction_callback.apply_sigmoid = False
 
-        metric = PoseEstimationMetrics(
+        metric = ChessPoseEstimationMetrics(
             post_prediction_callback=post_prediction_callback,
             max_objects_per_image=post_prediction_callback.max_num_people,
             num_joints=val_loader.dataset.num_joints,
             oks_sigmas=self.oks_sigmas,
         )
+        # metric = PoseEstimationMetrics(
+        #     post_prediction_callback=post_prediction_callback,
+        #     max_objects_per_image=post_prediction_callback.max_num_people,
+        #     num_joints=val_loader.dataset.num_joints,
+        #     oks_sigmas=self.oks_sigmas,
+        # )
 
         for inputs, targets, extras in tqdm(val_loader):
             with torch.no_grad(), torch.cuda.amp.autocast(True):
@@ -69,12 +75,18 @@ class PoseEstimationModelsIntegrationTest(unittest.TestCase):
             output_stride=4, max_num_people=30, apply_sigmoid=False, keypoint_threshold=0.05, nms_threshold=0.05, nms_num_threshold=8
         )
 
-        metric = PoseEstimationMetrics(
+        metric = ChessPoseEstimationMetrics(
             post_prediction_callback=post_prediction_callback,
             max_objects_per_image=post_prediction_callback.max_num_people,
             num_joints=val_loader.dataset.num_joints,
             oks_sigmas=self.oks_sigmas,
         )
+        # metric = PoseEstimationMetrics(
+        #     post_prediction_callback=post_prediction_callback,
+        #     max_objects_per_image=post_prediction_callback.max_num_people,
+        #     num_joints=val_loader.dataset.num_joints,
+        #     oks_sigmas=self.oks_sigmas,
+        # )
 
         for inputs, targets, extras in tqdm(val_loader):
             with torch.no_grad(), torch.cuda.amp.autocast(True):
@@ -102,12 +114,18 @@ class PoseEstimationModelsIntegrationTest(unittest.TestCase):
             output_stride=4, max_num_people=30, apply_sigmoid=False, keypoint_threshold=0.05, nms_threshold=0.05, nms_num_threshold=8
         )
 
-        metric = PoseEstimationMetrics(
+        metric = ChessPoseEstimationMetrics(
             post_prediction_callback=RescoringPoseEstimationDecodeCallback(apply_sigmoid=True),
             max_objects_per_image=post_prediction_callback.max_num_people,
             num_joints=val_loader.dataset.num_joints,
             oks_sigmas=self.oks_sigmas,
         )
+        # metric = PoseEstimationMetrics(
+        #     post_prediction_callback=RescoringPoseEstimationDecodeCallback(apply_sigmoid=True),
+        #     max_objects_per_image=post_prediction_callback.max_num_people,
+        #     num_joints=val_loader.dataset.num_joints,
+        #     oks_sigmas=self.oks_sigmas,
+        # )
 
         for inputs, targets, extras in tqdm(val_loader):
             with torch.no_grad(), torch.cuda.amp.autocast(True):

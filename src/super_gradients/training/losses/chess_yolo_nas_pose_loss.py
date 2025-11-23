@@ -175,14 +175,21 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device))
             ious = ious * pose_oks
 
-        # gather pred bboxes class score
-        pred_scores = torch.permute(pred_scores, [0, 2, 1])
+        # # gather pred bboxes class score
+        # pred_scores = torch.permute(pred_scores, [0, 2, 1])
         batch_ind = torch.arange(end=batch_size, dtype=gt_labels.dtype, device=gt_labels.device).unsqueeze(-1)
-        gt_labels_ind = torch.stack([batch_ind.tile([1, num_max_boxes]), gt_labels.squeeze(-1)], dim=-1)
+        # gt_labels_ind = torch.stack([batch_ind.tile([1, num_max_boxes]), gt_labels.squeeze(-1)], dim=-1)
+        # bbox_cls_scores = pred_scores[gt_labels_ind[..., 0], gt_labels_ind[..., 1]]
 
-        import pdb
-        pdb.set_trace()
-        bbox_cls_scores = pred_scores[gt_labels_ind[..., 0], gt_labels_ind[..., 1]]
+        B, L, C = pred_scores.shape
+        gt_labels_squeezed = gt_labels.squeeze(-1).long()   # [B, n]
+        # one-hot over classes: [B, n, C]
+        gt_one_hot = F.one_hot(gt_labels_squeezed, num_classes=C).float()
+        # pred_scores: [B, L, C] -> [B, 1, L, C]
+        # gt_one_hot : [B, n, C] -> [B, n, 1, C]
+        # broadcast → [B, n, L, C], then sum over C
+        bbox_cls_scores = (pred_scores.unsqueeze(1) * gt_one_hot.unsqueeze(2)).sum(-1)  # [B, n, L]
+
 
         # compute alignment metrics, [B, n, L]
         alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(self.beta)
@@ -489,8 +496,6 @@ class ChessYoloNASPoseLoss(nn.Module):
         loss_pose_reg = loss_pose_reg * self.pose_reg_loss_weight
 
         loss = loss_cls + loss_iou + loss_dfl + loss_pose_cls + loss_pose_reg
-        import pdb
-        pdb.set_trace()
         log_losses = torch.stack([loss_cls.detach(), loss_iou.detach(), loss_dfl.detach(), loss_pose_cls.detach(), loss_pose_reg.detach(), loss.detach()])
 
         return loss, log_losses

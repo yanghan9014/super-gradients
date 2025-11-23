@@ -13,7 +13,7 @@ from super_gradients.training import Trainer
 from super_gradients.training import models
 from super_gradients.training.dataloaders import get_data_loader
 from super_gradients.training.datasets import COCOPoseEstimationDataset
-from super_gradients.training.metrics import PoseEstimationMetrics
+from super_gradients.training.metrics import PoseEstimationMetrics, ChessPoseEstimationMetrics
 
 logger = get_logger(__name__)
 
@@ -68,11 +68,16 @@ class YoloNASPoseIntegrationTest(unittest.TestCase):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         setup_device(device=device, multi_gpu=MultiGPUMode.OFF)
         trainer = Trainer(experiment_name)
-        metric = PoseEstimationMetrics(
+        metric = ChessPoseEstimationMetrics(
             post_prediction_callback=model.get_post_prediction_callback(conf=0.01, iou=0.7, post_nms_max_predictions=30),
             num_joints=self.num_joints,
             oks_sigmas=self.sigmas,
         )
+        # metric = PoseEstimationMetrics(
+        #     post_prediction_callback=model.get_post_prediction_callback(conf=0.01, iou=0.7, post_nms_max_predictions=30),
+        #     num_joints=self.num_joints,
+        #     oks_sigmas=self.sigmas,
+        # )
         loader = self._coco2017_val_yolo_nas_pose()
         metric_values = trainer.test(model=model, test_loader=loader, test_metrics_list=[metric])
         logger.info(experiment_name, metric_values)

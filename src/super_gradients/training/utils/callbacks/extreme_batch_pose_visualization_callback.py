@@ -17,7 +17,7 @@ from super_gradients.training.utils.visualization.pose_estimation import PoseVis
 # while still having type hints
 if typing.TYPE_CHECKING:
     from super_gradients.training.samples import PoseEstimationSample
-    from super_gradients.module_interfaces import PoseEstimationPredictions
+    from super_gradients.module_interfaces import PoseEstimationPredictions, ChessPoseEstimationPredictions
 
 
 @register_callback("ExtremeBatchPoseEstimationVisualizationCallback")
@@ -208,7 +208,7 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
 
         inputs = self.universal_undo_preprocessing_fn(self.extreme_batch)
         gt_samples: List[PoseEstimationSample] = self.extreme_additional_batch_items["gt_samples"]
-        predictions: List[PoseEstimationPredictions] = self.post_prediction_callback(self.extreme_preds)
+        predictions: List[ChessPoseEstimationPredictions] = self.post_prediction_callback(self.extreme_preds)
 
         images_to_save_preds = self._visualize_batch(
             image_tensor=inputs,

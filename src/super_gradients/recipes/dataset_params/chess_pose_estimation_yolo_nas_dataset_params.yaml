@@ -1,6 +1,7 @@
 defaults:
-  - coco_pose_common_dataset_params
   - _self_
+
+num_joints: 1
 
 # This is a shortcut parameter to set size of training & validation images.
 image_size: 640
