@@ -47,7 +47,6 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         """
         # First is model predictions, second element of tuple is logits for loss computation
         predictions = outputs[0]
-        import pdb; pdb.set_trace()
 
         decoded_predictions: List[ChessPoseEstimationPredictions] = []
         for pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores in zip(*predictions):
@@ -60,7 +59,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             pred_cls_conf, pred_cls_label = torch.max(pred_bboxes_conf, dim=1)
             conf_mask = pred_cls_conf >= self.pose_confidence_threshold  # [Anchors]
 
-            pred_cls_conf = pred_cls_conf[conf_mask]
+            pred_cls_conf = pred_cls_conf[conf_mask].float()
             pred_cls_label = pred_cls_label[conf_mask]
             pred_bboxes_conf = pred_bboxes_conf[conf_mask].float()
             pred_bboxes_xyxy = pred_bboxes_xyxy[conf_mask].float()
@@ -71,7 +70,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             if pred_bboxes_conf.size(0) > self.pre_nms_max_predictions:
                 topk_candidates = torch.topk(pred_cls_conf, k=self.pre_nms_max_predictions, dim=0, largest=True, sorted=True)
                 topk_idx = topk_candidates.indices
-                pred_cls_conf = pred_cls_conf[topk_idx]
+                pred_cls_conf = pred_cls_conf[topk_idx].float()
                 pred_cls_label = pred_cls_label[topk_idx]
                 pred_bboxes_conf = pred_bboxes_conf[topk_idx]
                 pred_bboxes_xyxy = pred_bboxes_xyxy[topk_idx]
@@ -83,9 +82,11 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
 
             # NMS
             if self.class_agnostic_nms:
-                idx_to_keep = torchvision.ops.boxes.nms(pred_bboxes_xyxy, pred_cls_conf, iou_threshold=self.nms_iou_threshold)
+                idx_to_keep = torchvision.ops.boxes.nms(pred_bboxes_xyxy.float(), pred_cls_conf.float(), iou_threshold=self.nms_iou_threshold)
             else:
-                idx_to_keep = torchvision.ops.boxes.batched_nms(boxes=pred_bboxes_xyxy, scores=pred_cls_conf, idxs=pred_cls_label, iou_threshold=self.nms_iou_threshold)
+                idx_to_keep = torchvision.ops.boxes.batched_nms(
+                    boxes=pred_bboxes_xyxy.float(), scores=pred_cls_conf.float(), idxs=pred_cls_label, iou_threshold=self.nms_iou_threshold
+                )
 
             final_bboxes = pred_bboxes_xyxy[idx_to_keep]  # [Instances,]
             final_class_scores = pred_bboxes_conf[idx_to_keep]  # [Instances,]

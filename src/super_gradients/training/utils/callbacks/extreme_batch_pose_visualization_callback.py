@@ -137,7 +137,7 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
         keypoints: List[Union[np.ndarray, Tensor]],
         bboxes: List[Union[None, np.ndarray, Tensor]],
         scores: Optional[List[Union[None, np.ndarray, Tensor]]],
-        is_crowd: Optional[List[Union[None, np.ndarray, Tensor]]],
+        # is_crowd: Optional[List[Union[None, np.ndarray, Tensor]]],
         keypoint_colors: List[Tuple[int, int, int]],
         edge_colors: List[Tuple[int, int, int]],
         edge_links: List[Tuple[int, int]],
@@ -164,7 +164,7 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
             keypoints_i = keypoints[i]
             bboxes_i = bboxes[i]
             scores_i = scores[i] if scores is not None else None
-            is_crowd_i = is_crowd[i] if is_crowd is not None else None
+            # is_crowd_i = is_crowd[i] if is_crowd is not None else None
 
             if torch.is_tensor(keypoints_i):
                 keypoints_i = keypoints_i.detach().cpu().numpy()
@@ -172,16 +172,38 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
                 bboxes_i = bboxes_i.detach().cpu().numpy()
             if torch.is_tensor(scores_i):
                 scores_i = scores_i.detach().cpu().numpy()
-            if torch.is_tensor(is_crowd_i):
-                is_crowd_i = is_crowd_i.detach().cpu().numpy()
+            # if torch.is_tensor(is_crowd_i):
+            #     is_crowd_i = is_crowd_i.detach().cpu().numpy()
+
+            pose_scores_i = None
+            pose_labels_i = None
+            if scores_i is not None:
+                scores_arr = np.asarray(scores_i)
+                # If scores are per-joint (Num Instances, Num Joints) collapse to per-pose by mean
+                if scores_arr.ndim == 2:
+                    if keypoints_i is not None and scores_arr.shape[1] == keypoints_i.shape[1]:
+                        pose_scores_i = scores_arr.mean(axis=1)
+                    else:
+                        pose_scores_i = scores_arr.max(axis=1)
+                        pose_labels_i = scores_arr.argmax(axis=1).astype(int)
+                elif scores_arr.ndim == 1:
+                    pose_scores_i = scores_arr
+                else:
+                    pose_scores_i = None
+                    pose_labels_i = None
+                if pose_scores_i is not None and pose_scores_i.size == 0:
+                    pose_scores_i = None
+                if pose_labels_i is not None and pose_labels_i.size == 0:
+                    pose_labels_i = None
 
             res_image = image_tensor[i]
             res_image = PoseVisualization.draw_poses(
                 image=res_image,
                 poses=keypoints_i,
                 boxes=bboxes_i,
-                scores=scores_i,
-                is_crowd=is_crowd_i,
+                scores=pose_scores_i,
+                pose_labels=pose_labels_i,
+                # is_crowd=is_crowd_i,
                 show_keypoint_confidence=show_keypoint_confidence,
                 edge_links=edge_links,
                 edge_colors=edge_colors,
@@ -214,8 +236,8 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
             image_tensor=inputs,
             keypoints=[p.poses for p in predictions],
             bboxes=[p.bboxes_xyxy for p in predictions],
-            scores=[p.scores for p in predictions],
-            is_crowd=None,
+            scores=[p.class_scores for p in predictions],
+            # is_crowd=None,
             edge_links=self.edge_links,
             edge_colors=self.edge_colors,
             keypoint_colors=self.keypoint_colors,
@@ -228,7 +250,7 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
             keypoints=[gt.joints for gt in gt_samples],
             bboxes=[xywh_to_xyxy(gt.bboxes_xywh, image_shape=None) if gt.bboxes_xywh is not None else None for gt in gt_samples],
             scores=None,
-            is_crowd=[gt.is_crowd for gt in gt_samples],
+            # is_crowd=[gt.is_crowd for gt in gt_samples],
             edge_links=self.edge_links,
             edge_colors=self.edge_colors,
             keypoint_colors=self.keypoint_colors,

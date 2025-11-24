@@ -312,11 +312,18 @@ class ChessPoseEstimationMetrics(Metric):
 
             cls_targets_mask = torch.logical_and(~gt_is_ignore, cls_gt_mask)
 
-            targets = gt_keypoints_xy[cls_targets_mask] if len(gt_joints) else []
-            targets_visibilities = gt_keypoints_visibility[cls_targets_mask] if len(gt_joints) else []
-            targets_areas = gt_areas[cls_targets_mask] if len(gt_joints) else []
-            targets_bboxes = gt_bboxes[cls_targets_mask]
-            targets_ignored = torch.zeros(len(targets), dtype=torch.bool, device="cpu") if len(targets) else []
+            if len(gt_joints):
+                targets = gt_keypoints_xy[cls_targets_mask]
+                targets_visibilities = gt_keypoints_visibility[cls_targets_mask]
+                targets_areas = gt_areas[cls_targets_mask]
+                targets_bboxes = gt_bboxes[cls_targets_mask]
+            else:
+                targets = torch.zeros((0, self.num_joints, 2), dtype=torch.float32, device="cpu")
+                targets_visibilities = torch.zeros((0, self.num_joints), dtype=torch.float32, device="cpu")
+                targets_areas = torch.zeros((0,), dtype=torch.float32, device="cpu")
+                targets_bboxes = torch.zeros((0, 4), dtype=torch.float32, device="cpu")
+
+            targets_ignored = torch.zeros(targets.shape[0], dtype=torch.bool, device="cpu")
 
             empty_crowd_targets = torch.zeros((0, self.num_joints, 2), dtype=torch.float32, device="cpu")
             empty_crowd_visibilities = torch.zeros((0, self.num_joints), dtype=torch.float32, device="cpu")

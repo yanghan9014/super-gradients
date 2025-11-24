@@ -125,7 +125,8 @@ class PoseVisualization:
         poses: np.ndarray,
         boxes: Optional[np.ndarray],
         scores: Optional[np.ndarray],
-        is_crowd: Optional[np.ndarray],
+        pose_labels: Optional[np.ndarray] = None,
+        # is_crowd: Optional[np.ndarray],
         edge_links: Union[np.ndarray, List[Tuple[int, int]]],
         edge_colors: Union[None, np.ndarray, List[Tuple[int, int, int]]],
         keypoint_colors: Union[None, np.ndarray, List[Tuple[int, int, int]]],
@@ -154,8 +155,10 @@ class PoseVisualization:
             raise ValueError("boxes and poses must have the same length")
         if scores is not None and len(scores) != len(poses):
             raise ValueError("conf and poses must have the same length")
-        if is_crowd is not None and len(is_crowd) != len(poses):
-            raise ValueError("is_crowd and poses must have the same length")
+        if pose_labels is not None and len(pose_labels) != len(poses):
+            raise ValueError("pose_labels and poses must have the same length")
+        # if is_crowd is not None and len(is_crowd) != len(poses):
+        #     raise ValueError("is_crowd and poses must have the same length")
 
         # For visualization purposes, sort poses by confidence starting from the least confident
         if scores is not None:
@@ -164,8 +167,10 @@ class PoseVisualization:
             scores = scores[order]
             if boxes is not None:
                 boxes = boxes[order]
-            if is_crowd is not None:
-                is_crowd = is_crowd[order]
+            if pose_labels is not None:
+                pose_labels = pose_labels[order]
+            # if is_crowd is not None:
+            #     is_crowd = is_crowd[order]
 
         res_image = image.copy()
         num_poses = len(poses)
@@ -209,8 +214,11 @@ class PoseVisualization:
                 title = ""
                 if scores is not None:
                     title += f"{scores[pose_index]:.2f}"
-                if is_crowd is not None:
-                    title += f"Crowd {is_crowd[pose_index]}"
+                if pose_labels is not None:
+                    label = pose_labels[pose_index]
+                    title = f"{title} cls {label}".strip()
+                # if is_crowd is not None:
+                #     title += f"Crowd {is_crowd[pose_index]}"
 
                 res_image = draw_bbox(
                     image=res_image,
