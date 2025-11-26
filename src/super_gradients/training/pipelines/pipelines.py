@@ -447,7 +447,7 @@ class PoseEstimationPipeline(Pipeline):
             decoded_predictions.append(
                 PoseEstimationPrediction(
                     poses=image_level_predictions.poses.cpu().numpy() if torch.is_tensor(image_level_predictions.poses) else image_level_predictions.poses,
-                    scores=image_level_predictions.scores.cpu().numpy() if torch.is_tensor(image_level_predictions.scores) else image_level_predictions.scores,
+                    scores=image_level_predictions.class_scores.cpu().numpy() if torch.is_tensor(image_level_predictions.class_scores) else image_level_predictions.class_scores,
                     bboxes_xyxy=(
                         image_level_predictions.bboxes_xyxy.cpu().numpy()
                         if torch.is_tensor(image_level_predictions.bboxes_xyxy)

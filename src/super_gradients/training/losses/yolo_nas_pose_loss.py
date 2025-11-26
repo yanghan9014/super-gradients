@@ -145,8 +145,6 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         """
         assert pred_scores.ndim == pred_bboxes.ndim
         assert gt_labels.ndim == gt_bboxes.ndim and gt_bboxes.ndim == 3
-        import pdb
-        pdb.set_trace()
 
         batch_size, num_anchors, num_classes = pred_scores.shape
         _, _, num_keypoints, _ = pred_pose_coords.shape

@@ -5,8 +5,10 @@ defaults:
 num_classes: 21
 oks_sigmas: [0.1]
 flip_indexes: [0]
-edge_links: []
-edge_colors: []
+edge_links: 
+  - [0, 1]
+edge_colors: 
+  - [214, 39, 40]
 keypoint_colors:
   - [255, 0, 0]
 

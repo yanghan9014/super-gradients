@@ -97,15 +97,15 @@ def draw_skeleton(
             y = int(cy + h // 2)
             cv2.putText(overlay, text, org=(x, y), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=(250, 250, 250), thickness=1, lineType=cv2.LINE_AA)
 
-    if edge_links is not None:
-        for (kp1, kp2), color in zip(edge_links, edge_colors):
-            show = keypoints_to_show_mask[kp1] and keypoints_to_show_mask[kp2]
-            if not show:
-                continue
-            p1 = tuple(map(int, keypoints[kp1]))
-            p2 = tuple(map(int, keypoints[kp2]))
-            color = tuple(map(int, color))
-            cv2.line(overlay, p1, p2, color=color, thickness=joint_thickness, lineType=cv2.LINE_AA)
+    # if edge_links is not None:
+    #     for (kp1, kp2), color in zip(edge_links, edge_colors):
+    #         show = keypoints_to_show_mask[kp1] and keypoints_to_show_mask[kp2]
+    #         if not show:
+    #             continue
+    #         p1 = tuple(map(int, keypoints[kp1]))
+    #         p2 = tuple(map(int, keypoints[kp2]))
+    #         color = tuple(map(int, color))
+    #         cv2.line(overlay, p1, p2, color=color, thickness=joint_thickness, lineType=cv2.LINE_AA)
 
     confident_keypoints = keypoints[keypoints_to_show_mask]
 

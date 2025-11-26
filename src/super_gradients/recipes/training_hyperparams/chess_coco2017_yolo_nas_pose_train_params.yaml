@@ -10,7 +10,6 @@ lr_warmup_epochs: 10
 initial_lr:  2e-3
 lr_mode: cosine
 cosine_final_lr_ratio: 0.05
-max_epochs: 11
 
 zero_weight_decay_on_bias_and_bn: True
 batch_accumulate: 1
@@ -23,7 +22,7 @@ loss: chess_yolo_nas_pose_loss
 criterion_params:
     oks_sigmas: ${dataset_params.oks_sigmas}
     num_classes: ${dataset_params.num_classes}
-    classification_loss_weight: 1.0
+    classification_loss_weight: 3.0
     classification_loss_type: focal
     regression_iou_loss_type: ciou
     iou_loss_weight: 2.5
@@ -58,7 +57,7 @@ valid_metrics_list:
         pre_nms_max_predictions: 300
         post_nms_max_predictions: 30
 
-run_validation_freq: 100
+run_validation_freq: 50
 
 phase_callbacks:
   # You can uncomment this callback to visualize predictions during training

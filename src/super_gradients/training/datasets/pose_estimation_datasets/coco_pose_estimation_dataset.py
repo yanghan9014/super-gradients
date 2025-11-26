@@ -142,8 +142,6 @@ class COCOPoseEstimationDataset(AbstractPoseEstimationDataset):
         gt_bboxes_xywh = xyxy_to_xywh(gt_bboxes, image_shape=(image_height, image_width))
 
         mask: np.ndarray = self._get_crowd_mask(gt_segmentations[gt_iscrowd], image_shape)
-        import pdb
-        pdb.set_trace()
         return PoseEstimationSample(
             image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, bboxes_xywh=gt_bboxes_xywh, is_crowd=gt_iscrowd, additional_samples=None
         )

@@ -593,7 +593,6 @@ class ChessYoloNASPoseLoss(nn.Module):
         # select positive samples mask that are not crowd and not background
         # loss ALWAYS respect the crowd targets by excluding them from contributing to the loss
         # if you want to train WITH crowd targets, mark them as non-crowd on dataset level
-        # if you want to train WITH crowd targets, mark them as non-crowd on dataset level
         mask_positive = (assign_result.assigned_labels != self.num_classes) * assign_result.assigned_crowd.eq(0)
         num_pos = mask_positive.sum()
         assigned_bboxes_divided_by_stride = assign_result.assigned_bboxes / stride_tensor

@@ -487,8 +487,6 @@ class Trainer:
             for batch_idx, batch_items in enumerate(progress_bar_train_loader):
                 if expected_iterations <= batch_idx:
                     break
-                # import pdb
-                # pdb.set_trace()
 
                 batch_items = core_utils.tensor_container_to_device(batch_items, device_config.device, non_blocking=True)
                 inputs, targets, additional_batch_items = sg_trainer_utils.unpack_batch_items(batch_items)
