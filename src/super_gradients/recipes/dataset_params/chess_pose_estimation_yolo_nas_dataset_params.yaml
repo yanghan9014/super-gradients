@@ -8,10 +8,6 @@ image_size: 640
 dataset_params_suffix: "${dataset_params.image_size}"
 
 train_dataset_params:
-  data_dir: /data/coco # root path to coco data
-  images_dir: images/train2017
-  json_file: annotations/person_keypoints_train2017.json
-
   edge_links: ${dataset_params.edge_links}
   edge_colors: ${dataset_params.edge_colors}
   keypoint_colors: ${dataset_params.keypoint_colors}

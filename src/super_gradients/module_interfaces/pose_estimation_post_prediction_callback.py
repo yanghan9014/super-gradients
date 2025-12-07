@@ -43,6 +43,24 @@ class ChessPoseEstimationPredictions:
     class_scores: Union[Tensor, np.ndarray]
     bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
 
+@dataclasses.dataclass
+class ChessHomoPoseEstimationPredictions:
+    """
+    A data class that encapsulates pose estimation predictions for a single image.
+
+    :param poses:        Array of shape [N, K, 3] where N is number of poses and K is number of joints.
+                         Last dimension is [x, y, score] where score the confidence score for the specific joint
+                         with [0..1] range.
+    :param class_scores: Array of shape [N, C] with class scores for each pose with [0..1] range.
+    :param bboxes_xyxy:  Array of shape [N, 4] with bounding boxes for each pose in XYXY format.
+                         Can be None if bounding boxes are not available (for instance, DEKR model does not output boxes).
+    :param homography:   Array of shape [8] with homography matrix.
+    """
+
+    poses: Union[Tensor, np.ndarray]
+    class_scores: Union[Tensor, np.ndarray]
+    bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
+    homography: Optional[Union[Tensor, np.ndarray]]
 
 class AbstractPoseEstimationPostPredictionCallback(abc.ABC):
     """

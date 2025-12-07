@@ -14,6 +14,7 @@ from super_gradients.training.losses.stdc_loss import STDCLoss
 from super_gradients.training.losses.rescoring_loss import RescoringLoss
 from super_gradients.training.losses.yolo_nas_pose_loss import YoloNASPoseLoss
 from super_gradients.training.losses.chess_yolo_nas_pose_loss import ChessYoloNASPoseLoss
+from super_gradients.training.losses.chess_homo_yolo_nas_pose_loss import ChessHomoYoloNASPoseLoss
 from super_gradients.common.object_names import Losses
 from super_gradients.common.registry.registry import LOSSES
 
@@ -37,4 +38,5 @@ __all__ = [
     "RescoringLoss",
     "YoloNASPoseLoss",
     "ChessYoloNASPoseLoss",
+    "ChessHomoYoloNASPoseLoss",
 ]

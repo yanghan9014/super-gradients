@@ -18,6 +18,7 @@ class Losses:
     RESCORING_LOSS = "RescoringLoss"
     YOLONAS_POSE_LOSS = "YoloNASPoseLoss"
     CHESS_YOLONAS_POSE_LOSS = "ChessYoloNASPoseLoss"
+    CHESS_HOMO_YOLONAS_POSE_LOSS = "ChessHomoYoloNASPoseLoss"
 
 
 class Metrics:

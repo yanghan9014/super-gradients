@@ -2,7 +2,7 @@ from .module_interfaces import HasPredict, HasPreprocessingParams, SupportsRepla
 from .exceptions import ModelHasNoPreprocessingParamsException
 from .exportable_detector import ExportableObjectDetectionModel, AbstractObjectDetectionDecodingModule, ObjectDetectionModelExportResult
 from .exportable_pose_estimation import ExportablePoseEstimationModel, PoseEstimationModelExportResult, AbstractPoseEstimationDecodingModule
-from .pose_estimation_post_prediction_callback import AbstractPoseEstimationPostPredictionCallback, PoseEstimationPredictions, ChessPoseEstimationPredictions
+from .pose_estimation_post_prediction_callback import AbstractPoseEstimationPostPredictionCallback, PoseEstimationPredictions, ChessPoseEstimationPredictions, ChessHomoPoseEstimationPredictions
 from .supports_input_shape_check import SupportsInputShapeCheck
 from .quantization_result import QuantizationResult
 from .exportable_segmentation import (
@@ -24,6 +24,7 @@ __all__ = [
     "AbstractPoseEstimationPostPredictionCallback",
     "PoseEstimationPredictions",
     "ChessPoseEstimationPredictions",
+    "ChessHomoPoseEstimationPredictions",
     "ExportablePoseEstimationModel",
     "PoseEstimationModelExportResult",
     "AbstractPoseEstimationDecodingModule",

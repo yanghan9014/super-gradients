@@ -10,6 +10,8 @@ from .yolo_nas_pose import (
     ChessYoloNASPoseNDFLHeads,
     YoloNASPoseDFLHead,
     ChessYoloNASPoseDFLHead,
+    ChessHomoYoloNASPoseNDFLHeads,
+    ChessHomoYoloNASPoseDFLHead,
 )
 
 __all__ = [
@@ -22,7 +24,9 @@ __all__ = [
     "YoloNASPose_L",
     "YoloNASPoseDFLHead",
     "ChessYoloNASPoseDFLHead",
+    "ChessHomoYoloNASPoseDFLHead",
     "YoloNASPoseNDFLHeads",
-    "ChessYoloNASPoseNDFLHeads"
+    "ChessYoloNASPoseNDFLHeads",
+    "ChessHomoYoloNASPoseNDFLHeads",
     "YoloNASPosePostPredictionCallback",
 ]

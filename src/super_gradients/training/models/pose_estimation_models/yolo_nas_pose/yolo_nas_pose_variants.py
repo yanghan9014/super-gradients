@@ -21,6 +21,7 @@ from super_gradients.training.utils.utils import HpmStruct
 from super_gradients.module_interfaces import AbstractPoseEstimationDecodingModule, ExportablePoseEstimationModel, SupportsInputShapeCheck
 # from .yolo_nas_pose_post_prediction_callback import YoloNASPosePostPredictionCallback
 from .chess_yolo_nas_pose_post_prediction_callback import ChessYoloNASPosePostPredictionCallback
+from .chess_homo_yolo_nas_pose_post_prediction_callback import ChessHomoYoloNASPosePostPredictionCallback
 
 logger = get_logger(__name__)
 
@@ -265,8 +266,8 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
     @classmethod
     def get_post_prediction_callback(
         cls, conf: float, iou: float, pre_nms_max_predictions=1000, post_nms_max_predictions=300
-    ) -> ChessYoloNASPosePostPredictionCallback:
-        return ChessYoloNASPosePostPredictionCallback(
+    ) -> ChessHomoYoloNASPosePostPredictionCallback:
+        return ChessHomoYoloNASPosePostPredictionCallback(
             pose_confidence_threshold=conf,
             nms_iou_threshold=iou,
             pre_nms_max_predictions=pre_nms_max_predictions,

@@ -172,6 +172,7 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         """
         rgb_to_bgr = {Processings.ReverseImageChannels: {}}
         image_to_tensor = {Processings.ImagePermute: {"permutation": (2, 0, 1)}}
+        # pipeline = self.transforms.get_equivalent_preprocessing() + [image_to_tensor]
         pipeline = [rgb_to_bgr] + self.transforms.get_equivalent_preprocessing() + [image_to_tensor]
         params = dict(
             conf=0.05,
