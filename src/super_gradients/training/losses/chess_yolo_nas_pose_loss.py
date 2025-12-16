@@ -350,7 +350,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.average_losses_in_ddp = average_losses_in_ddp
 
     @torch.no_grad()
-    def _unpack_flat_targets(self, targets: Tuple[Tensor, Tensor, Tensor], batch_size: int) -> Mapping[str, torch.Tensor]:
+    def _unpack_flat_targets(self, targets: Tuple[Tensor, ...], batch_size: int) -> Mapping[str, torch.Tensor]:
         """
         Convert targets to PPYoloE-compatible format since it's the easiest (not the cleanest) way to
         have PP Yolo training & metrics computed
@@ -410,11 +410,11 @@ class ChessYoloNASPoseLoss(nn.Module):
 
     def forward(
         self,
-        outputs: Tuple[Tuple[Tensor, Tensor, Tensor, Tensor], Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]],
-        targets: Tuple[Tensor, Tensor, Tensor],
+        outputs: Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...]],
+        targets: Tuple[Tensor, ...],
     ) -> Tuple[Tensor, Tensor]:
         """
-        :param outputs: Tuple of pred_scores, pred_distri, anchors, anchor_points, num_anchors_list, stride_tensor
+        :param outputs: Tuple of model decoded predictions and raw tensors.
         :param targets: A tuple of (boxes, joints, class_labels) tensors where
                         - boxes: [N, 5] (batch_index, x1, y1, x2, y2)
                         - joints: [N, num_joints, 4] (batch_index, x, y, visibility)
@@ -435,6 +435,7 @@ class ChessYoloNASPoseLoss(nn.Module):
             stride_tensor,
         ) = predictions
 
+        _, target_joints, target_class_labels = targets[:3]
         targets = self._unpack_flat_targets(targets, batch_size=pred_scores.size(0))
 
         anchor_points_s = anchor_points / stride_tensor
@@ -496,7 +497,16 @@ class ChessYoloNASPoseLoss(nn.Module):
         loss_pose_reg = loss_pose_reg * self.pose_reg_loss_weight
 
         loss = loss_cls + loss_iou + loss_dfl + loss_pose_cls + loss_pose_reg
-        log_losses = torch.stack([loss_cls.detach(), loss_iou.detach(), loss_dfl.detach(), loss_pose_cls.detach(), loss_pose_reg.detach(), loss.detach()])
+        log_losses = torch.stack(
+            [
+                loss_cls.detach(),
+                loss_iou.detach(),
+                loss_dfl.detach(),
+                loss_pose_cls.detach(),
+                loss_pose_reg.detach(),
+                loss.detach(),
+            ]
+        )
 
         return loss, log_losses
 

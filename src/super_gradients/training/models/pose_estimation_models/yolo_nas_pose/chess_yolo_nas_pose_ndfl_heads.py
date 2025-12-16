@@ -202,7 +202,16 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         anchors, anchor_points, num_anchors_list, _ = generate_anchors_for_grid_cell(feats, self.fpn_strides, self.grid_cell_scale, self.grid_cell_offset)
 
-        raw_predictions = cls_score_list, reg_distri_list, pose_regression_list, pose_logits_list, anchors, anchor_points, num_anchors_list, stride_tensor
+        raw_predictions = (
+            cls_score_list,
+            reg_distri_list,
+            pose_regression_list,
+            pose_logits_list,
+            anchors,
+            anchor_points,
+            num_anchors_list,
+            stride_tensor,
+        )
         return decoded_predictions, raw_predictions
 
     @property

@@ -227,7 +227,7 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
         :param skip_image_resizing: If True, the image processor will not resize the images.
         :param fp16:       If True, use mixed precision for inference.
         """
-        if None in (self._image_processor, self._default_nms_iou, self._default_nms_conf, self._edge_links):
+        if None in (self._image_processor, self._default_nms_iou, self._default_nms_conf):
             raise RuntimeError(
                 "You must set the dataset processing parameters before calling predict.\n" "Please call `model.set_dataset_processing_params(...)` first."
             )
@@ -255,9 +255,6 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
                 post_nms_max_predictions=post_nms_max_predictions,
             ),
             fuse_model=fuse_model,
-            edge_links=self._edge_links,
-            edge_colors=self._edge_colors,
-            keypoint_colors=self._keypoint_colors,
             fp16=fp16,
         )
         return pipeline

@@ -409,9 +409,6 @@ class PoseEstimationPipeline(Pipeline):
     def __init__(
         self,
         model: SgModule,
-        edge_links: Union[np.ndarray, List[Tuple[int, int]]],
-        edge_colors: Union[np.ndarray, List[Tuple[int, int, int]]],
-        keypoint_colors: Union[np.ndarray, List[Tuple[int, int, int]]],
         post_prediction_callback,
         device: Optional[str] = None,
         image_processor: Union[Processing, List[Processing]] = None,
@@ -430,9 +427,6 @@ class PoseEstimationPipeline(Pipeline):
             fp16=fp16,
         )
         self.post_prediction_callback = post_prediction_callback
-        self.edge_links = np.asarray(edge_links, dtype=int)
-        self.edge_colors = np.asarray(edge_colors, dtype=int)
-        self.keypoint_colors = np.asarray(keypoint_colors, dtype=int)
 
     def _decode_model_output(self, model_output: Union[List, Tuple, torch.Tensor], model_input: np.ndarray) -> List[PoseEstimationPrediction]:
         """Decode the model output, by applying post prediction callback. This includes NMS.
@@ -444,19 +438,29 @@ class PoseEstimationPipeline(Pipeline):
         list_of_predictions = self.post_prediction_callback(model_output)
         decoded_predictions = []
         for image_level_predictions, image in zip(list_of_predictions, model_input):
+            pred_poses = image_level_predictions.poses
+            pred_scores = getattr(image_level_predictions, "scores", None)
+            pred_labels = getattr(image_level_predictions, "labels", None)
+
+            poses_np = pred_poses.cpu().numpy() if torch.is_tensor(pred_poses) else pred_poses
+            if poses_np is None:
+                poses_np = np.zeros((0, 2), dtype=float)
+            poses_np = poses_np[..., :2]
+
+            scores_np = pred_scores.cpu().numpy() if torch.is_tensor(pred_scores) else pred_scores
+            if scores_np is None:
+                scores_np = np.zeros(len(poses_np), dtype=float)
+            labels_np = pred_labels.cpu().numpy() if torch.is_tensor(pred_labels) else pred_labels
+
+            if labels_np is None:
+                labels_np = np.zeros(len(poses_np), dtype=int)
+
             decoded_predictions.append(
                 PoseEstimationPrediction(
-                    poses=image_level_predictions.poses.cpu().numpy() if torch.is_tensor(image_level_predictions.poses) else image_level_predictions.poses,
-                    scores=image_level_predictions.class_scores.cpu().numpy() if torch.is_tensor(image_level_predictions.class_scores) else image_level_predictions.class_scores,
-                    bboxes_xyxy=(
-                        image_level_predictions.bboxes_xyxy.cpu().numpy()
-                        if torch.is_tensor(image_level_predictions.bboxes_xyxy)
-                        else image_level_predictions.bboxes_xyxy
-                    ),
+                    poses=poses_np,
+                    scores=scores_np,
+                    labels=labels_np,
                     image_shape=image.shape,
-                    edge_links=self.edge_links,
-                    edge_colors=self.edge_colors,
-                    keypoint_colors=self.keypoint_colors,
                 )
             )
 

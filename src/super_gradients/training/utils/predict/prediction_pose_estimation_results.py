@@ -47,17 +47,26 @@ class ImagePoseEstimationPrediction(ImagePrediction):
         :param box_thickness:   (Optional) Thickness of bounding boxes. If None, will adapt to the box size.
         :return:                Image with predicted bboxes. Note that this does not modify the original image.
         """
+        poses = self.prediction.poses
+        poses = poses[..., :2]
+        if poses.ndim == 2:
+            poses_for_vis = poses[:, None, :]
+        else:
+            poses_for_vis = poses
+
         image = PoseVisualization.draw_poses(
             image=self.image,
-            poses=self.prediction.poses,
+            poses=poses_for_vis,
             scores=self.prediction.scores,
-            boxes=self.prediction.bboxes_xyxy,
-            edge_links=self.prediction.edge_links,
-            edge_colors=edge_colors or self.prediction.edge_colors,
+            pose_labels=getattr(self.prediction, "labels", None),
+            boxes=None,
+            edge_links=None,
+            edge_colors=edge_colors,
             joint_thickness=joint_thickness,
-            keypoint_colors=keypoint_colors or self.prediction.keypoint_colors,
+            keypoint_colors=keypoint_colors,
             keypoint_radius=keypoint_radius,
             box_thickness=box_thickness,
+            keypoint_confidence_threshold=0.0,
         )
 
         return image
