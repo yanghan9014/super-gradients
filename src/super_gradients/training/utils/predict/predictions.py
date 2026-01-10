@@ -97,10 +97,11 @@ class PoseEstimationPrediction(Prediction):
         :param bboxes_xyxy:      Bounding boxes of each pose in xyxy format [Num Poses, 4]
         :param image_shape: Shape of the image the prediction is made on, (H, W).
         """
-        self._validate_input(poses, scores, labels)
+        self._validate_input(poses, scores, labels, bboxes_xyxy)
         self.poses = poses
         self.scores = scores
         self.labels = labels
+        self.bboxes_xyxy = bboxes_xyxy
         self.image_shape = image_shape
 
     def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray, bboxes: Optional[np.ndarray]) -> None:
