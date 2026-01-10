@@ -72,11 +72,13 @@ class PoseEstimationPrediction(Prediction):
     :param poses:  Numpy array of [Num Poses, 2] shape
     :param scores: Numpy array of [Num Poses] shape
     :param labels: Numpy array of [Num Poses] shape
+    :param boxes:  Numpy array of [Num Poses, 4] shape which represents the bounding boxes of each pose in xyxy format
     """
 
     poses: np.ndarray
     scores: np.ndarray
     labels: np.ndarray
+    bboxes_xyxy: Optional[np.ndarray]
     image_shape: Tuple[int, int]
 
     def __init__(
@@ -84,6 +86,7 @@ class PoseEstimationPrediction(Prediction):
         poses: np.ndarray,
         scores: np.ndarray,
         labels: np.ndarray,
+        bboxes_xyxy: Optional[np.ndarray],
         image_shape: Tuple[int, int],
         **_,
     ):
@@ -91,6 +94,7 @@ class PoseEstimationPrediction(Prediction):
         :param poses:       Predicted poses as a numpy array of shape [Num Poses, 2]
         :param scores:      Confidence scores for each pose [Num Poses]
         :param labels:      Labels associated with each pose [Num Poses]
+        :param bboxes_xyxy:      Bounding boxes of each pose in xyxy format [Num Poses, 4]
         :param image_shape: Shape of the image the prediction is made on, (H, W).
         """
         self._validate_input(poses, scores, labels)
@@ -99,13 +103,15 @@ class PoseEstimationPrediction(Prediction):
         self.labels = labels
         self.image_shape = image_shape
 
-    def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray) -> None:
+    def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray, bboxes: Optional[np.ndarray]) -> None:
         if not isinstance(poses, np.ndarray):
             raise ValueError(f"Argument poses must be a numpy array, not {type(poses)}")
         if not isinstance(scores, np.ndarray):
             raise ValueError(f"Argument scores must be a numpy array, not {type(scores)}")
         if not isinstance(labels, np.ndarray):
             raise ValueError(f"Argument labels must be a numpy array, not {type(labels)}")
+        if bboxes is not None and not isinstance(bboxes, np.ndarray):
+            raise ValueError(f"Argument bboxes must be a numpy array, not {type(bboxes)}")
         if len(poses) != len(scores) or len(poses) != len(labels):
             raise ValueError(
                 f"The number of poses ({len(poses)}) does not match the number of scores ({len(scores)}) or labels ({len(labels)})."

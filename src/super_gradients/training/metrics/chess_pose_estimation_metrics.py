@@ -191,7 +191,7 @@ class ChessPoseEstimationMetrics(Metric):
         for i in range(len(predictions)):
             self.update_single_image(
                 predicted_poses=predictions[i].poses,
-                predicted_class_scores=predictions[i].class_scores,
+                predicted_class_scores=predictions[i].scores,
                 gt_joints=gt_samples[i].joints,
                 gt_bboxes=gt_samples[i].bboxes_xywh,
                 gt_areas=gt_samples[i].areas,

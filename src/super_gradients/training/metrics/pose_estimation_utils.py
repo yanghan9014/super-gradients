@@ -76,8 +76,8 @@ def compute_oks(
         y1 = gt_bbox[1] + gt_bbox[3] * 2
 
         for pred_index, pred_keypoints in enumerate(pred_joints):
-            xd = pred_keypoints[:, 0]
-            yd = pred_keypoints[:, 1]
+            xd = pred_keypoints[0]
+            yd = pred_keypoints[1]
             if k1 > 0:
                 # measure the per-keypoint distance if keypoints visible
                 dx = xd - xg

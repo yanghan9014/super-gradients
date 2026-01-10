@@ -393,6 +393,12 @@ class _KeypointsPadding(Processing, ABC):
             shift_h=-metadata.padding_coordinates.top,
             shift_w=-metadata.padding_coordinates.left,
         )
+        if predictions.bboxes_xyxy is not None:
+            predictions.bboxes_xyxy = _shift_bboxes_xyxy(
+                targets=predictions.bboxes_xyxy,
+                shift_h=-metadata.padding_coordinates.top,
+                shift_w=-metadata.padding_coordinates.left,
+            )
         return predictions
 
     @abstractmethod
@@ -492,6 +498,12 @@ class KeypointsAutoPadding(AutoPadding):
             shift_h=-metadata.padding_coordinates.top,
             shift_w=-metadata.padding_coordinates.left,
         )
+        if predictions.bboxes_xyxy is not None:
+            predictions.bboxes_xyxy = _shift_bboxes_xyxy(
+                targets=predictions.bboxes_xyxy,
+                shift_h=-metadata.padding_coordinates.top,
+                shift_w=-metadata.padding_coordinates.left,
+            )
         return predictions
 
 
@@ -579,6 +591,8 @@ class DetectionLongestMaxSizeRescale(_LongestMaxSizeRescale):
 class KeypointsLongestMaxSizeRescale(_LongestMaxSizeRescale):
     def postprocess_predictions(self, predictions: PoseEstimationPrediction, metadata: RescaleMetadata) -> PoseEstimationPrediction:
         predictions.poses = _rescale_keypoints(targets=predictions.poses, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
+        if predictions.bboxes_xyxy is not None:
+            predictions.bboxes_xyxy = _rescale_bboxes(targets=predictions.bboxes_xyxy, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         return predictions
 
 
@@ -586,6 +600,8 @@ class KeypointsLongestMaxSizeRescale(_LongestMaxSizeRescale):
 class KeypointsRescale(_Rescale):
     def postprocess_predictions(self, predictions: PoseEstimationPrediction, metadata: RescaleMetadata) -> PoseEstimationPrediction:
         predictions.poses = _rescale_keypoints(targets=predictions.poses, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
+        if predictions.bboxes_xyxy is not None:
+            predictions.bboxes_xyxy = _rescale_bboxes(targets=predictions.bboxes_xyxy, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         return predictions
 
 

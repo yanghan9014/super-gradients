@@ -1151,7 +1151,7 @@ class ExtremeBatchCaseVisualizationCallback(Callback, ABC):
 
     def on_train_loader_end(self, context: PhaseContext) -> None:
         if self.enable_on_train_loader and (context.epoch + 1) % self.freq == 0:
-            self._gather_extreme_batch_images_and_log(context, "train")
+            # self._gather_extreme_batch_images_and_log(context, "train")
             self._reset()
 
     def on_validation_loader_start(self, context: PhaseContext) -> None:
@@ -1163,7 +1163,7 @@ class ExtremeBatchCaseVisualizationCallback(Callback, ABC):
 
     def on_validation_loader_end(self, context: PhaseContext) -> None:
         if self.enable_on_valid_loader and (context.epoch + 1) % self.freq == 0:
-            self._gather_extreme_batch_images_and_log(context, "valid")
+            # self._gather_extreme_batch_images_and_log(context, "valid")
             self._reset()
 
     def _gather_extreme_batch_images_and_log(self, context, loader_name: str):

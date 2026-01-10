@@ -263,8 +263,8 @@ class Trainer:
             arch_params=cfg.arch_params,
             strict_load=cfg.checkpoint_params.strict_load,
             pretrained_weights=cfg.checkpoint_params.pretrained_weights,
-            checkpoint_path=cfg.checkpoint_params.checkpoint_path,
-            load_backbone=cfg.checkpoint_params.load_backbone,
+            checkpoint_path=cfg.checkpoint_params.checkpoint_path,  # to load pretrain model change to the path to yolo_nas_pose_n_coco_pose.pth
+            load_backbone=cfg.checkpoint_params.load_backbone,      # to load pretrain model change to True
             checkpoint_num_classes=get_param(cfg.checkpoint_params, "checkpoint_num_classes"),
             num_input_channels=get_param(cfg.arch_params, "num_input_channels"),
         )

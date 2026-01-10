@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 num_classes: 21
-oks_sigmas: [0.1]
+oks_sigmas: [0.5]
 flip_indexes: [0]
 edge_links: 
   - [0, 1]
