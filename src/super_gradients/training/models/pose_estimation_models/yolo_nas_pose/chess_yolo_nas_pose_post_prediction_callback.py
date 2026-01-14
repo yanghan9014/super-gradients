@@ -137,7 +137,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
 
             center_mask = board_cls_label == BOARD_CORNER_CLASS_IDS['center']
             use_robust_post_processing = True
-            if use_robust_post_processing and board_cls_conf.numel() > 0 and sum(center_mask) > 0:
+            if use_robust_post_processing and board_cls_conf.numel() > 0 and sum(center_mask) > 0 and sum(~center_mask) > 0:
                 center_id = torch.argmax(center_mask * board_cls_conf)
                 center_xy = board_pose_coords[center_id].squeeze(0)
 
@@ -212,6 +212,14 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                     board_final_bboxes = bboxes_sorted[chosen_indexes]
                     board_final_scores = scores_sorted[chosen_indexes]
                     board_final_labels = labels_sorted[chosen_indexes]
+                    center_coord = center_xy.unsqueeze(0)
+                    center_bbox = board_bboxes_xyxy[center_id].unsqueeze(0)
+                    center_score = board_bboxes_conf[center_id].unsqueeze(0)
+                    center_label = board_cls_label[center_id].unsqueeze(0)
+                    board_final_coords = torch.cat([board_final_coords, center_coord], dim=0)
+                    board_final_bboxes = torch.cat([board_final_bboxes, center_bbox], dim=0)
+                    board_final_scores = torch.cat([board_final_scores, center_score], dim=0)
+                    board_final_labels = torch.cat([board_final_labels, center_label], dim=0)
             else:
                 unique_board_labels = torch.unique(board_cls_label)
                 if unique_board_labels.numel() > 0:
