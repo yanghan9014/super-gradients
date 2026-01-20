@@ -136,7 +136,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 piece_final_bboxes = piece_bboxes_xyxy[idx_to_keep]
 
             center_mask = board_cls_label == BOARD_CORNER_CLASS_IDS['center']
-            use_robust_post_processing = True
+            use_robust_post_processing = False
             if use_robust_post_processing and board_cls_conf.numel() > 0 and sum(center_mask) > 0 and sum(~center_mask) > 0:
                 center_id = torch.argmax(center_mask * board_cls_conf)
                 center_xy = board_pose_coords[center_id].squeeze(0)

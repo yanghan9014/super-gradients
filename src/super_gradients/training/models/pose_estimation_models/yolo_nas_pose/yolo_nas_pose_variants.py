@@ -285,7 +285,7 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
         conf: Optional[float] = None,
         iou: Optional[float] = 0.7,
         pre_nms_max_predictions=300,
-        post_nms_max_predictions=100,
+        post_nms_max_predictions=50,
     ) -> None:
         """Set the processing parameters for the dataset.
 
