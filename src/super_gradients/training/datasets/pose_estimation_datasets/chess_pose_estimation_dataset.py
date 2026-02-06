@@ -115,8 +115,6 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
             index = self.non_empty_annotation_indexes[index]
         ann = self.annotations[index]
 
-        image_shape = (ann.image_height, ann.image_width)
-
         # gt_iscrowd = ann.ann_is_crowd.copy()
         gt_joints = ann.ann_keypoints.copy()
         gt_bboxes = ann.ann_boxes_xyxy.copy()
@@ -133,11 +131,23 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
 
             orig_image = Image.open(ann.image_path).convert("BGR")
 
-        if orig_image.shape[0] != ann.image_height or orig_image.shape[1] != ann.image_width:
-            raise RuntimeError(f"Annotated image size ({ann.image_height,ann.image_width}) does not match image size in file {orig_image.shape[:2]}")
+        image_height, image_width = orig_image.shape[:2]
+        if image_height != ann.image_height or image_width != ann.image_width:
+            if image_height == ann.image_width and image_width == ann.image_height:
+                # logger.warning(
+                #     "Annotated image size is swapped (H,W) for %s: ann=%s file=%s. Using file size.",
+                #     ann.image_path,
+                #     (ann.image_height, ann.image_width),
+                #     (image_height, image_width),
+                # )
+                pass
+            else:
+                raise RuntimeError(
+                    f"Annotated image size ({ann.image_height,ann.image_width}) does not match image size in file {(image_height, image_width)}"
+                )
 
         # Clip bboxes to image boundaries (Some annotations extend 1-2px outside of image boundaries)
-        image_height, image_width = orig_image.shape[:2]
+        image_shape = (image_height, image_width)
         gt_bboxes[:, 0] = np.clip(gt_bboxes[:, 0], 0, image_width)
         gt_bboxes[:, 1] = np.clip(gt_bboxes[:, 1], 0, image_height)
         gt_bboxes[:, 2] = np.clip(gt_bboxes[:, 2], 0, image_width)
