@@ -21,6 +21,7 @@ loss: chess_yolo_nas_pose_loss
 
 criterion_params:
     oks_sigmas: ${dataset_params.oks_sigmas}
+    board_oks_sigmas: ${dataset_params.board_oks_sigmas}
     num_classes: ${dataset_params.num_classes}
     classification_loss_weight: 20.0
     classification_loss_type: focal
@@ -29,7 +30,8 @@ criterion_params:
     dfl_loss_weight: 0.01
     pose_cls_loss_weight: 1.0
     pose_reg_loss_weight: 34.0
-    # board_reg_loss_weight: 0.001
+    board_cls_loss_weight: 1.0
+    board_reg_loss_weight: 34.0
     pose_classification_loss_type: focal
     rescale_pose_loss_with_assigned_score: True
     assigner_multiply_by_pose_oks: True

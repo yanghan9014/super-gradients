@@ -14,9 +14,10 @@ from super_gradients.training.utils.bbox_utils import batch_distance2bbox
 from super_gradients.training.utils.utils import infer_model_dtype, infer_model_device
 
 # Declare type aliases for better readability
-# We cannot use typing.TypeAlias since it is not supported in python 3.7
-YoloNasPoseDecodedPredictions = Tuple[Tensor, Tensor, Tensor, Tensor]
-YoloNasPoseRawOutputs = Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor]
+# Decoded predictions: (bboxes, scores, piece_pose_coords, piece_pose_scores, board_coords, board_scores)
+YoloNasPoseDecodedPredictions = Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]
+# Raw outputs: (cls_scores, reg_distri, pose_reg, pose_logits, board_reg, board_logits, anchors, anchor_points, num_anchors, stride)
+YoloNasPoseRawOutputs = Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor]
 
 
 @register_detection_module()
@@ -128,25 +129,29 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         Runs the forward for all the underlying heads and concatenate the predictions to a single result.
         :param feats: List of feature maps from the neck of different strides
         :return: Return value depends on the mode:
-        If tracing, a tuple of 4 tensors (decoded predictions) is returned:
+        If tracing, a tuple of 6 tensors (decoded predictions) is returned:
         - pred_bboxes [B, Num Anchors, 4] - Predicted boxes in XYXY format
-        - pred_scores [B, Num Anchors, 1] - Predicted scores for each box
-        - pred_pose_coords [B, Num Anchors, Num Keypoints, 2] - Predicted poses in XY format
-        - pred_pose_scores [B, Num Anchors, Num Keypoints] - Predicted scores for each keypoint
+        - pred_scores [B, Num Anchors, C] - Predicted scores for each box
+        - pred_pose_coords [B, Num Anchors, 1, 2] - Predicted piece keypoint in XY format
+        - pred_pose_scores [B, Num Anchors, 1] - Predicted score for piece keypoint
+        - pred_board_coords [B, Num Anchors, 9, 2] - Predicted board keypoints in XY format
+        - pred_board_scores [B, Num Anchors, 9] - Predicted scores for each board keypoint
 
         In training/eval mode, a tuple of 2 tensors returned:
         - decoded predictions - they are the same as in tracing mode
-        - raw outputs - a tuple of 8 elements in total, this is needed for training the model.
+        - raw outputs - a tuple of 10 elements in total, this is needed for training the model.
         """
 
         cls_score_list, reg_distri_list, reg_dist_reduced_list = [], [], []
         pose_regression_list = []
         pose_logits_list = []
+        board_regression_list = []
+        board_logits_list = []
 
         for i, feat in enumerate(feats):
             b, _, h, w = feat.shape
             height_mul_width = h * w
-            reg_distri, cls_logit, pose_regression, pose_logits = getattr(self, f"head{i + 1}")(feat)
+            reg_distri, cls_logit, pose_regression, pose_logits, board_regression, board_logits = getattr(self, f"head{i + 1}")(feat)
             reg_distri_list.append(torch.permute(reg_distri.flatten(2), [0, 2, 1]))
 
             reg_dist_reduced = torch.permute(reg_distri.reshape([-1, 4, self.reg_max + 1, height_mul_width]), [0, 2, 3, 1])
@@ -162,6 +167,9 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
             pose_regression_list.append(torch.permute(pose_regression.flatten(3), [0, 3, 1, 2]))  # [B, J, 2, H, W] -> [B, H * W, J, 2]
             pose_logits_list.append(torch.permute(pose_logits.flatten(2), [0, 2, 1]))  # [B, J, H, W] -> [B, H * W, J]
 
+            board_regression_list.append(torch.permute(board_regression.flatten(3), [0, 3, 1, 2]))  # [B, 9, 2, H, W] -> [B, H*W, 9, 2]
+            board_logits_list.append(torch.permute(board_logits.flatten(2), [0, 2, 1]))  # [B, 9, H, W] -> [B, H*W, 9]
+
         cls_score_list = torch.cat(cls_score_list, dim=-1)  # [B, C, Anchors]
         cls_score_list = torch.permute(cls_score_list, [0, 2, 1])  # # [B, Anchors, C]
 
@@ -170,6 +178,9 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         pose_regression_list = torch.cat(pose_regression_list, dim=1)  # [B, Anchors, J, 2]
         pose_logits_list = torch.cat(pose_logits_list, dim=1)  # [B, Anchors, J]
+
+        board_regression_list = torch.cat(board_regression_list, dim=1)  # [B, Anchors, 9, 2]
+        board_logits_list = torch.cat(board_logits_list, dim=1)  # [B, Anchors, 9]
 
         # Decode bboxes
         # Note in eval mode, anchor_points_inference is different from anchor_points computed on train
@@ -181,7 +192,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         pred_scores = cls_score_list.sigmoid()
         pred_bboxes = batch_distance2bbox(anchor_points_inference, reg_dist_reduced_list) * stride_tensor  # [B, Anchors, 4]
 
-        # Decode keypoints
+        # Decode piece keypoints
         if self.pose_offset_multiplier != 1.0:
             pose_regression_list *= self.pose_offset_multiplier
 
@@ -192,10 +203,24 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         pose_regression_list *= stride_tensor.unsqueeze(0).unsqueeze(2)
 
-        pred_pose_coords = pose_regression_list.detach().clone()  # [B, Anchors, C, 2]
-        pred_pose_scores = pose_logits_list.detach().clone().sigmoid()  # [B, Anchors, C]
+        pred_pose_coords = pose_regression_list.detach().clone()  # [B, Anchors, 1, 2]
+        pred_pose_scores = pose_logits_list.detach().clone().sigmoid()  # [B, Anchors, 1]
 
-        decoded_predictions = pred_bboxes, pred_scores, pred_pose_coords, pred_pose_scores
+        # Decode board keypoints (same anchor+stride logic)
+        if self.pose_offset_multiplier != 1.0:
+            board_regression_list *= self.pose_offset_multiplier
+
+        if self.compensate_grid_cell_offset:
+            board_regression_list += anchor_points_inference.unsqueeze(0).unsqueeze(2) - self.grid_cell_offset
+        else:
+            board_regression_list += anchor_points_inference.unsqueeze(0).unsqueeze(2)
+
+        board_regression_list *= stride_tensor.unsqueeze(0).unsqueeze(2)
+
+        pred_board_coords = board_regression_list.detach().clone()  # [B, Anchors, 9, 2]
+        pred_board_scores = board_logits_list.detach().clone().sigmoid()  # [B, Anchors, 9]
+
+        decoded_predictions = pred_bboxes, pred_scores, pred_pose_coords, pred_pose_scores, pred_board_coords, pred_board_scores
 
         if torch.jit.is_tracing() or self.inference_mode:
             return decoded_predictions
@@ -207,6 +232,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
             reg_distri_list,
             pose_regression_list,
             pose_logits_list,
+            board_regression_list,
+            board_logits_list,
             anchors,
             anchor_points,
             num_anchors_list,

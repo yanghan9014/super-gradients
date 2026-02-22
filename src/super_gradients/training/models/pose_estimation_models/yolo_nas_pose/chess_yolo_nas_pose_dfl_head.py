@@ -12,6 +12,9 @@ from super_gradients.modules.base_modules import BaseDetectionModule
 from super_gradients.modules.utils import width_multiplier
 
 
+NUM_BOARD_KEYPOINTS = 9  # a1, a8, h1, h8, center, a45, h45, 1de, 8de
+
+
 @register_detection_module()
 class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     """
@@ -19,7 +22,8 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
 
     It implements:
       - multi-class object detection (num_classes detection classes)
-      - keypoint regression with exactly 1 keypoint per detection (x, y, confidence)
+      - keypoint regression with exactly 1 keypoint per piece detection (x, y, confidence)
+      - board keypoint regression with 9 keypoints per board detection (x, y, confidence each)
         on a single scale feature map.
     """
 
@@ -140,6 +144,12 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         # Pose: 3 channels total (1 joint × (x, y, confidence))
         self.pose_pred = nn.Conv2d(pose_inter_channels, 3 * self.num_joints, 1, 1, 0)
 
+        # ----- board branch (9 keypoints) -----
+        self.num_board_keypoints = NUM_BOARD_KEYPOINTS
+        board_convs = [pose_block(pose_inter_channels, pose_inter_channels) for _ in range(pose_regression_blocks)]
+        self.board_convs = nn.Sequential(*board_convs)
+        self.board_pred = nn.Conv2d(pose_inter_channels, 3 * self.num_board_keypoints, 1, 1, 0)
+
         self.cls_dropout_rate = nn.Dropout2d(cls_dropout_rate) if cls_dropout_rate > 0 else nn.Identity()
         self.reg_dropout_rate = nn.Dropout2d(reg_dropout_rate) if reg_dropout_rate > 0 else nn.Identity()
 
@@ -157,14 +167,16 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     def out_channels(self):
         return None
 
-    def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """
         :param x: Input feature map of shape [B, Cin, H, W]
-        :return: Tuple of [reg_output, cls_output, pose_regression, pose_logits]
-            - reg_output:      [B, 4 * (reg_max + 1), H, W]
-            - cls_output:      [B, num_classes, H, W]
-            - pose_regression: [B, 1, 2, H, W]   (single keypoint per detection: x, y)
-            - pose_logits:     [B, 1, H, W]      (confidence score for that keypoint)
+        :return: Tuple of [reg_output, cls_output, pose_regression, pose_logits, board_regression, board_logits]
+            - reg_output:       [B, 4 * (reg_max + 1), H, W]
+            - cls_output:       [B, num_classes, H, W]
+            - pose_regression:  [B, 1, 2, H, W]   (single keypoint per piece detection: x, y)
+            - pose_logits:      [B, 1, H, W]       (confidence score for that keypoint)
+            - board_regression: [B, 9, 2, H, W]    (9 board keypoints: x, y each)
+            - board_logits:     [B, 9, H, W]        (confidence score for each board keypoint)
         """
         x = self.stem(x)
         pose_features = self.pose_stem(x)
@@ -180,7 +192,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         reg_feat = self.reg_dropout_rate(reg_feat)
         reg_output = self.reg_pred(reg_feat)
 
-        # pose regression
+        # pose regression (piece: 1 keypoint)
         pose_feat = self.pose_convs(pose_features)
         pose_feat = self.reg_dropout_rate(pose_feat)
 
@@ -194,7 +206,17 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_logits = pose_output[:, :, 2, :, :]        # [B, 1, H, W]
         pose_regression = pose_output[:, :, 0:2, :, :]  # [B, 1, 2, H, W]
 
-        return reg_output, cls_output, pose_regression, pose_logits
+        # board regression (9 keypoints)
+        board_feat = self.board_convs(pose_features)
+        board_feat = self.reg_dropout_rate(board_feat)
+
+        board_output = self.board_pred(board_feat)  # [B, 27, H, W]
+        board_output = board_output.view(B, self.num_board_keypoints, 3, H, W)
+
+        board_logits = board_output[:, :, 2, :, :]        # [B, 9, H, W]
+        board_regression = board_output[:, :, 0:2, :, :]  # [B, 9, 2, H, W]
+
+        return reg_output, cls_output, pose_regression, pose_logits, board_regression, board_logits
 
     def _initialize_biases(self):
         prior_bias = -math.log((1 - self.prior_prob) / self.prior_prob)

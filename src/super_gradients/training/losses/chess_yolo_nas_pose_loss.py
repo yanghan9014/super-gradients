@@ -311,9 +311,12 @@ class ChessYoloNASPoseLoss(nn.Module):
         assigner_multiply_by_pose_oks: bool = False,
         rescale_pose_loss_with_assigned_score: bool = False,
         average_losses_in_ddp: bool = False,
+        board_oks_sigmas: Optional[Union[List[float], np.ndarray, Tensor]] = None,
+        board_cls_loss_weight: float = 1.0,
+        board_reg_loss_weight: float = 1.0,
     ):
         """
-        :param oks_sigmas:                 OKS sigmas for pose estimation. Array of [Num Keypoints].
+        :param oks_sigmas:                 OKS sigmas for pose estimation (piece keypoints). Array of [Num Keypoints].
         :param classification_loss_type:   Classification loss type. One of "focal" or "bce"
         :param regression_iou_loss_type:   Regression IoU loss type. One of "giou" or "ciou"
         :param classification_loss_weight: Classification loss weight
@@ -321,10 +324,10 @@ class ChessYoloNASPoseLoss(nn.Module):
         :param dfl_loss_weight:            DFL loss weight
         :param pose_cls_loss_weight:       Pose classification loss weight
         :param pose_reg_loss_weight:       Pose regression loss weight
-        :param average_losses_in_ddp:      Whether to average losses in DDP mode. In theory, enabling this option
-                                           should have the positive impact on model accuracy since it would smooth out
-                                           influence of batches with small number of objects.
-                                           However, it needs to be proven empirically.
+        :param board_oks_sigmas:           OKS sigmas for board keypoints. Array of [9]. Defaults to same as piece.
+        :param board_cls_loss_weight:      Board keypoint classification loss weight
+        :param board_reg_loss_weight:      Board keypoint regression loss weight
+        :param average_losses_in_ddp:      Whether to average losses in DDP mode.
         """
         super().__init__()
         self.classification_loss_type = classification_loss_type
@@ -348,6 +351,15 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.pose_classification_loss_type = pose_classification_loss_type
         self.rescale_pose_loss_with_assigned_score = rescale_pose_loss_with_assigned_score
         self.average_losses_in_ddp = average_losses_in_ddp
+
+        # Board keypoint loss params
+        self.board_class_id = num_classes - 1  # Board is the last class
+        if board_oks_sigmas is not None:
+            self.board_oks_sigmas = torch.tensor(board_oks_sigmas)
+        else:
+            self.board_oks_sigmas = torch.full((9,), oks_sigmas[0] if len(oks_sigmas) > 0 else 0.5)
+        self.board_cls_loss_weight = board_cls_loss_weight
+        self.board_reg_loss_weight = board_reg_loss_weight
 
     @torch.no_grad()
     def _unpack_flat_targets(self, targets: Tuple[Tensor, ...], batch_size: int) -> Mapping[str, torch.Tensor]:
@@ -427,8 +439,10 @@ class ChessYoloNASPoseLoss(nn.Module):
         (
             pred_scores,
             pred_distri,
-            pred_pose_coords,  # [B, Anchors, C, 2]
-            pred_pose_logits,  # [B, Anchors, C]
+            pred_pose_coords,  # [B, Anchors, 1, 2]
+            pred_pose_logits,  # [B, Anchors, 1]
+            pred_board_coords,  # [B, Anchors, 9, 2]
+            pred_board_logits,  # [B, Anchors, 9]
             anchors,
             anchor_points,
             num_anchors_list,
@@ -478,11 +492,13 @@ class ChessYoloNASPoseLoss(nn.Module):
         assigned_scores_sum = torch.clip(assigned_scores_sum, min=1.0)
         loss_cls /= assigned_scores_sum
 
-        loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg = self._bbox_loss(
+        loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg, loss_board_cls, loss_board_reg = self._bbox_loss(
             pred_distri,
             pred_bboxes,
             pred_pose_coords=pred_pose_coords,
             pred_pose_logits=pred_pose_logits,
+            pred_board_coords=pred_board_coords,
+            pred_board_logits=pred_board_logits,
             stride_tensor=stride_tensor,
             anchor_points=anchor_points_s,
             assign_result=assign_result,
@@ -495,8 +511,10 @@ class ChessYoloNASPoseLoss(nn.Module):
         loss_dfl = loss_dfl * self.dfl_loss_weight
         loss_pose_cls = loss_pose_cls * self.pose_cls_loss_weight
         loss_pose_reg = loss_pose_reg * self.pose_reg_loss_weight
+        loss_board_cls = loss_board_cls * self.board_cls_loss_weight
+        loss_board_reg = loss_board_reg * self.board_reg_loss_weight
 
-        loss = loss_cls + loss_iou + loss_dfl + loss_pose_cls + loss_pose_reg
+        loss = loss_cls + loss_iou + loss_dfl + loss_pose_cls + loss_pose_reg + loss_board_cls + loss_board_reg
         log_losses = torch.stack(
             [
                 loss_cls.detach(),
@@ -504,6 +522,8 @@ class ChessYoloNASPoseLoss(nn.Module):
                 loss_dfl.detach(),
                 loss_pose_cls.detach(),
                 loss_pose_reg.detach(),
+                loss_board_cls.detach(),
+                loss_board_reg.detach(),
                 loss.detach(),
             ]
         )
@@ -512,7 +532,7 @@ class ChessYoloNASPoseLoss(nn.Module):
 
     @property
     def component_names(self):
-        return ["loss_cls", "loss_iou", "loss_dfl", "loss_pose_cls", "loss_pose_reg", "loss"]
+        return ["loss_cls", "loss_iou", "loss_dfl", "loss_pose_cls", "loss_pose_reg", "loss_board_cls", "loss_board_reg", "loss"]
 
     def _df_loss(self, pred_dist: Tensor, target: Tensor) -> Tensor:
         target_left = target.long()
@@ -594,6 +614,8 @@ class ChessYoloNASPoseLoss(nn.Module):
         pred_bboxes,
         pred_pose_coords,
         pred_pose_logits,
+        pred_board_coords,
+        pred_board_logits,
         stride_tensor,
         anchor_points,
         assign_result: YoloNASPoseYoloNASPoseBoxesAssignmentResult,
@@ -628,31 +650,73 @@ class ChessYoloNASPoseLoss(nn.Module):
             loss_dfl = self._df_loss(pred_dist_pos, assigned_ltrb_pos) * bbox_weight
             loss_dfl = loss_dfl.sum() / assigned_scores_sum
 
-            # Do not divide poses by stride since this would skew the loss and make sigmas incorrect
-            pred_pose_coords = pred_pose_coords[mask_positive]
-            pred_pose_logits = pred_pose_logits[mask_positive].unsqueeze(-1)  # To make [Num Instances, Num Joints, 1]
+            # Separate piece vs board instances
+            assigned_labels_flat = assign_result.assigned_labels  # [B, L]
+            is_piece = mask_positive & (assigned_labels_flat != self.board_class_id)  # [B, L]
+            is_board = mask_positive & (assigned_labels_flat == self.board_class_id)  # [B, L]
 
-            gt_pose_coords = assign_result.assigned_poses[..., 0:2][mask_positive]
-            gt_pose_visibility = assign_result.assigned_poses[mask_positive][:, :, 2:3]
+            # ---- Piece keypoint loss (1 keypoint, using pose branch) ----
+            num_piece = is_piece.sum()
+            if num_piece > 0:
+                piece_pose_coords = pred_pose_coords[is_piece]  # [N_piece, 1, 2]
+                piece_pose_logits = pred_pose_logits[is_piece].unsqueeze(-1)  # [N_piece, 1, 1]
 
-            area = self._xyxy_box_area(assigned_bboxes_pos_image_coord).reshape([-1, 1]) * 0.53
-            loss_pose_reg, loss_pose_cls = self._keypoint_loss(
-                predicted_coords=pred_pose_coords,
-                target_coords=gt_pose_coords,
-                predicted_logits=pred_pose_logits,
-                target_visibility=gt_pose_visibility,
-                assigned_scores=bbox_weight if self.rescale_pose_loss_with_assigned_score else None,
-                assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
-                area=area,
-                sigmas=self.oks_sigmas.to(pred_pose_logits.device),
-            )
+                gt_piece_pose_coords = assign_result.assigned_poses[..., 0:2][is_piece]  # [N_piece, J, 2]
+                gt_piece_pose_visibility = assign_result.assigned_poses[is_piece][:, :, 2:3]  # [N_piece, J, 1]
+
+                piece_bboxes = assign_result.assigned_bboxes[is_piece]  # [N_piece, 4]
+                piece_area = self._xyxy_box_area(piece_bboxes).reshape([-1, 1]) * 0.53
+                piece_bbox_weight = assign_result.assigned_scores.sum(-1)[is_piece].unsqueeze(-1) if self.rescale_pose_loss_with_assigned_score else None
+
+                loss_pose_reg, loss_pose_cls = self._keypoint_loss(
+                    predicted_coords=piece_pose_coords,
+                    target_coords=gt_piece_pose_coords,
+                    predicted_logits=piece_pose_logits,
+                    target_visibility=gt_piece_pose_visibility,
+                    assigned_scores=piece_bbox_weight,
+                    assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
+                    area=piece_area,
+                    sigmas=self.oks_sigmas.to(pred_pose_logits.device),
+                )
+            else:
+                loss_pose_cls = torch.zeros([], device=pred_bboxes.device)
+                loss_pose_reg = torch.zeros([], device=pred_bboxes.device)
+
+            # ---- Board keypoint loss (9 keypoints, using board branch) ----
+            num_board = is_board.sum()
+            if num_board > 0:
+                board_coords = pred_board_coords[is_board]  # [N_board, 9, 2]
+                board_logits = pred_board_logits[is_board].unsqueeze(-1)  # [N_board, 9, 1]
+
+                gt_board_coords = assign_result.assigned_poses[..., 0:2][is_board]  # [N_board, J, 2]
+                gt_board_visibility = assign_result.assigned_poses[is_board][:, :, 2:3]  # [N_board, J, 1]
+
+                board_bboxes = assign_result.assigned_bboxes[is_board]  # [N_board, 4]
+                board_area = self._xyxy_box_area(board_bboxes).reshape([-1, 1]) * 0.53
+                board_bbox_weight = assign_result.assigned_scores.sum(-1)[is_board].unsqueeze(-1) if self.rescale_pose_loss_with_assigned_score else None
+
+                loss_board_reg, loss_board_cls = self._keypoint_loss(
+                    predicted_coords=board_coords,
+                    target_coords=gt_board_coords,
+                    predicted_logits=board_logits,
+                    target_visibility=gt_board_visibility,
+                    assigned_scores=board_bbox_weight,
+                    assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
+                    area=board_area,
+                    sigmas=self.board_oks_sigmas.to(pred_board_logits.device),
+                )
+            else:
+                loss_board_cls = torch.zeros([], device=pred_bboxes.device)
+                loss_board_reg = torch.zeros([], device=pred_bboxes.device)
         else:
             loss_iou = torch.zeros([], device=pred_bboxes.device)
             loss_dfl = torch.zeros([], device=pred_bboxes.device)
             loss_pose_cls = torch.zeros([], device=pred_bboxes.device)
             loss_pose_reg = torch.zeros([], device=pred_bboxes.device)
+            loss_board_cls = torch.zeros([], device=pred_bboxes.device)
+            loss_board_reg = torch.zeros([], device=pred_bboxes.device)
 
-        return loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg
+        return loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg, loss_board_cls, loss_board_reg
 
     def _bbox_decode(self, anchor_points: Tensor, pred_dist: Tensor) -> Tuple[Tensor, int]:
         """
