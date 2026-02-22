@@ -185,17 +185,131 @@ class ChessPoseEstimationMetrics(Metric):
         """
         Update internal state of metric class with a batch of predictions and groundtruth samples.
 
-        :param predictions: Decoded list of pose predictions
-        :param gt_samples:  Corresponding list of groundtruth samples
+        For pieces (labels 0-11): each detection is 1 entry with 1 keypoint.
+        For board (label 12): the 9 board keypoints are unpacked into 9 individual entries
+        with synthetic labels 12-20, giving per-keypoint evaluation.
         """
+        BOARD_CLASS_ID = 12
+        NUM_BOARD_KPS = 9
+
         for i in range(len(predictions)):
-            self.update_single_image(
-                predicted_poses=predictions[i].poses,
-                predicted_class_scores=predictions[i].scores,
-                gt_joints=gt_samples[i].joints,
-                gt_bboxes=gt_samples[i].bboxes_xywh,
-                gt_areas=gt_samples[i].areas,
-                gt_labels=getattr(gt_samples[i], "labels", None),
+            pred = predictions[i]
+            gt = gt_samples[i]
+
+            # --- Build piece entries ---
+            piece_poses = pred.poses       # [N_pieces, 2]
+            piece_scores = pred.scores     # [N_pieces, C]
+            piece_labels = pred.labels     # [N_pieces]
+
+            # --- Unpack board prediction into 9 per-keypoint entries ---
+            board_kpts = getattr(pred, "board_keypoints", None)
+            board_conf = getattr(pred, "board_confidence", None)
+
+            if board_kpts is not None:
+                board_kpts_t = convert_to_tensor(board_kpts, dtype=torch.float32, device="cpu")  # [9, 2]
+                board_conf_val = float(board_conf) if board_conf is not None else 1.0
+
+                # Create 9 entries: labels 12-20, each with its keypoint
+                board_poses_list = board_kpts_t  # [9, 2]
+                board_labels_list = torch.arange(BOARD_CLASS_ID, BOARD_CLASS_ID + NUM_BOARD_KPS, dtype=torch.long)
+                # Scores: [9] filled with board_confidence
+                board_scores_list = torch.full((NUM_BOARD_KPS,), board_conf_val, dtype=torch.float32)
+
+                # Filter out zero keypoints (padding)
+                valid_mask = (board_kpts_t.abs().sum(dim=-1) > 0)
+                board_poses_list = board_poses_list[valid_mask]
+                board_labels_list = board_labels_list[valid_mask]
+                board_scores_list = board_scores_list[valid_mask]
+            else:
+                board_poses_list = torch.zeros((0, 2), dtype=torch.float32)
+                board_labels_list = torch.zeros((0,), dtype=torch.long)
+                board_scores_list = torch.zeros((0,), dtype=torch.float32)
+
+            # --- Combine pieces + board entries ---
+            piece_poses_t = convert_to_tensor(piece_poses, dtype=torch.float32, device="cpu")
+            if piece_poses_t.ndim == 1:
+                piece_poses_t = piece_poses_t.reshape(0, 2)
+            piece_labels_t = convert_to_tensor(piece_labels, dtype=torch.long, device="cpu")
+            piece_scores_t = convert_to_tensor(piece_scores, dtype=torch.float32, device="cpu")
+
+            # Get max score per piece
+            if piece_scores_t.ndim == 2 and piece_scores_t.shape[0] > 0:
+                piece_max_scores = piece_scores_t.max(dim=1).values
+            elif piece_scores_t.ndim == 1:
+                piece_max_scores = piece_scores_t
+            else:
+                piece_max_scores = torch.zeros((0,), dtype=torch.float32)
+
+            all_poses = torch.cat([piece_poses_t, board_poses_list], dim=0)
+            all_labels = torch.cat([piece_labels_t, board_labels_list], dim=0)
+            all_scores = torch.cat([piece_max_scores, board_scores_list], dim=0)
+
+            # --- Unpack GT ---
+            gt_joints = gt.joints  # [M, 9, 3] (padded to 9 keypoints)
+            gt_labels_arr = getattr(gt, "labels", None)
+            gt_bboxes = gt.bboxes_xywh
+            gt_areas = gt.areas
+
+            if gt_joints is not None and len(gt_joints) > 0:
+                gt_labels_np = np.array(gt_labels_arr, dtype=np.int64) if gt_labels_arr is not None else np.zeros(len(gt_joints), dtype=np.int64)
+
+                gt_all_poses = []
+                gt_all_labels = []
+                gt_all_bboxes = []
+                gt_all_areas = []
+
+                for j in range(len(gt_joints)):
+                    label = int(gt_labels_np[j])
+                    joints_j = gt_joints[j]  # [9, 3]
+                    bbox_j = gt_bboxes[j] if gt_bboxes is not None else None
+                    area_j = gt_areas[j] if gt_areas is not None else None
+
+                    if label == BOARD_CLASS_ID:
+                        # Unpack board GT: 9 keypoints → 9 entries with labels 12-20
+                        for kp_idx in range(NUM_BOARD_KPS):
+                            kp = joints_j[kp_idx]  # [3]: x, y, vis
+                            if kp[2] <= 0:
+                                continue  # Skip invisible keypoints
+                            gt_all_poses.append(np.array([[kp[0], kp[1], kp[2]]]))  # [1, 3]
+                            gt_all_labels.append(BOARD_CLASS_ID + kp_idx)
+                            if bbox_j is not None:
+                                gt_all_bboxes.append(bbox_j)
+                            if area_j is not None:
+                                gt_all_areas.append(area_j)
+                    else:
+                        # Piece: use first keypoint only
+                        kp = joints_j[0]
+                        gt_all_poses.append(np.array([[kp[0], kp[1], kp[2]]]))  # [1, 3]
+                        gt_all_labels.append(label)
+                        if bbox_j is not None:
+                            gt_all_bboxes.append(bbox_j)
+                        if area_j is not None:
+                            gt_all_areas.append(area_j)
+
+                if gt_all_poses:
+                    gt_joints_flat = np.stack(gt_all_poses, axis=0)  # [K, 1, 3]
+                    gt_labels_flat = np.array(gt_all_labels, dtype=np.int64)
+                    gt_bboxes_flat = np.stack(gt_all_bboxes, axis=0) if gt_all_bboxes and len(gt_all_bboxes) == len(gt_all_poses) else None
+                    gt_areas_flat = np.array(gt_all_areas, dtype=np.float32) if gt_all_areas and len(gt_all_areas) == len(gt_all_poses) else None
+                else:
+                    gt_joints_flat = np.zeros((0, 1, 3), dtype=np.float32)
+                    gt_labels_flat = np.zeros((0,), dtype=np.int64)
+                    gt_bboxes_flat = None
+                    gt_areas_flat = None
+            else:
+                gt_joints_flat = np.zeros((0, 1, 3), dtype=np.float32)
+                gt_labels_flat = np.zeros((0,), dtype=np.int64)
+                gt_bboxes_flat = None
+                gt_areas_flat = None
+
+            self._update_single_image_flat(
+                predicted_poses=all_poses,
+                predicted_scores=all_scores,
+                predicted_labels=all_labels,
+                gt_joints=gt_joints_flat,
+                gt_bboxes=gt_bboxes_flat,
+                gt_areas=gt_areas_flat,
+                gt_labels=gt_labels_flat,
             )
 
     def _update_with_old_style_args(
@@ -347,6 +461,115 @@ class ChessPoseEstimationMetrics(Metric):
                 #
                 iou_thresholds=self.iou_thresholds.to("cpu"),
                 sigmas=self.oks_sigmas.to("cpu"),
+                top_k=self.max_objects_per_image,
+            )
+
+            self.predictions.append(
+                (int(class_id), mr.preds_matched.cpu(), mr.preds_to_ignore.cpu(), mr.preds_scores.cpu(), int(mr.num_targets))
+            )
+
+    def _update_single_image_flat(
+        self,
+        predicted_poses: torch.Tensor,
+        predicted_scores: torch.Tensor,
+        predicted_labels: torch.Tensor,
+        gt_joints: np.ndarray,
+        gt_bboxes: Optional[np.ndarray],
+        gt_areas: Optional[np.ndarray],
+        gt_labels: np.ndarray,
+    ) -> None:
+        """
+        Update metric state for a single image using pre-separated flat entries.
+        Each entry (pred or GT) has exactly 1 keypoint.
+
+        :param predicted_poses:  [N, 2] predicted keypoint positions
+        :param predicted_scores: [N] confidence scores
+        :param predicted_labels: [N] class labels (0-11 for pieces, 12-20 for board kps)
+        :param gt_joints:        [M, 1, 3] ground truth keypoints (x, y, vis)
+        :param gt_bboxes:        [M, 4] bounding boxes in XYWH format (optional)
+        :param gt_areas:         [M] areas (optional)
+        :param gt_labels:        [M] class labels
+        """
+        if len(predicted_poses) == 0 and len(gt_joints) == 0:
+            return
+
+        gt_keypoints = convert_to_tensor(gt_joints, dtype=torch.float32, device="cpu")
+        gt_labels_tensor = convert_to_tensor(gt_labels, dtype=torch.long, device="cpu")
+
+        if gt_bboxes is not None:
+            gt_bboxes_t = convert_to_tensor(gt_bboxes, dtype=torch.float32, device="cpu")
+        elif len(gt_keypoints) > 0:
+            gt_bboxes_t = compute_visible_bbox_xywh(gt_keypoints[:, :, 0:2], gt_keypoints[:, :, 2])
+        else:
+            gt_bboxes_t = torch.zeros((0, 4), dtype=torch.float32, device="cpu")
+
+        if gt_areas is not None:
+            gt_areas_t = convert_to_tensor(gt_areas, dtype=torch.float32, device="cpu")
+        elif len(gt_bboxes_t) > 0:
+            gt_areas_t = gt_bboxes_t[:, 2] * gt_bboxes_t[:, 3]
+        else:
+            gt_areas_t = torch.zeros((0,), dtype=torch.float32, device="cpu")
+
+        if len(gt_keypoints) > 0:
+            gt_keypoints_xy = gt_keypoints[:, :, 0:2]
+            gt_keypoints_visibility = gt_keypoints[:, :, 2]
+            gt_all_kpts_invisible = gt_keypoints_visibility.eq(0).all(dim=1)
+            gt_is_ignore = gt_all_kpts_invisible
+        else:
+            gt_is_ignore = torch.zeros((0,), dtype=torch.bool)
+
+        # Collect all classes
+        classes_tensors = []
+        if len(predicted_labels) > 0:
+            classes_tensors.append(predicted_labels)
+        if len(gt_labels_tensor) > 0:
+            classes_tensors.append(gt_labels_tensor)
+        if not classes_tensors:
+            return
+        classes = torch.unique(torch.cat(classes_tensors))
+
+        # Single-keypoint sigma
+        sigma_1 = self.oks_sigmas[0:1].to("cpu")
+
+        for class_id in classes:
+            cls_pred_mask = predicted_labels == class_id
+            cls_gt_mask = gt_labels_tensor == class_id
+            cls_targets_mask = torch.logical_and(~gt_is_ignore, cls_gt_mask) if len(gt_is_ignore) > 0 else cls_gt_mask
+
+            n_pred = cls_pred_mask.sum().item()
+            n_gt = cls_targets_mask.sum().item()
+
+            # Build predicted poses: [n_pred, 1, 2]
+            cls_pred_poses = predicted_poses[cls_pred_mask].unsqueeze(1) if n_pred > 0 else torch.zeros((0, 1, 2), dtype=torch.float32)
+            cls_pred_scores = predicted_scores[cls_pred_mask] if n_pred > 0 else torch.zeros((0,), dtype=torch.float32)
+
+            if n_gt > 0:
+                targets = gt_keypoints_xy[cls_targets_mask]
+                targets_visibilities = gt_keypoints_visibility[cls_targets_mask]
+                targets_areas = gt_areas_t[cls_targets_mask]
+                targets_bboxes = gt_bboxes_t[cls_targets_mask]
+            else:
+                targets = torch.zeros((0, 1, 2), dtype=torch.float32)
+                targets_visibilities = torch.zeros((0, 1), dtype=torch.float32)
+                targets_areas = torch.zeros((0,), dtype=torch.float32)
+                targets_bboxes = torch.zeros((0, 4), dtype=torch.float32)
+
+            targets_ignored = torch.zeros(targets.shape[0], dtype=torch.bool, device="cpu")
+
+            mr = compute_img_keypoint_matching(
+                cls_pred_poses,
+                cls_pred_scores,
+                targets=targets,
+                targets_visibilities=targets_visibilities,
+                targets_areas=targets_areas,
+                targets_bboxes=targets_bboxes,
+                targets_ignored=targets_ignored,
+                crowd_targets=torch.zeros((0, 1, 2), dtype=torch.float32),
+                crowd_visibilities=torch.zeros((0, 1), dtype=torch.float32),
+                crowd_targets_areas=torch.zeros((0,), dtype=torch.float32),
+                crowd_targets_bboxes=torch.zeros((0, 4), dtype=torch.float32),
+                iou_thresholds=self.iou_thresholds.to("cpu"),
+                sigmas=sigma_1,
                 top_k=self.max_objects_per_image,
             )
 

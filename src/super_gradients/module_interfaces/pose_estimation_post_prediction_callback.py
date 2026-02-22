@@ -31,17 +31,22 @@ class ChessPoseEstimationPredictions:
     """
     A data class that encapsulates pose estimation predictions for a single image.
 
-    :param poses:        Array of shape [N, 2]
-    :param scores:       Array of shape [N, J] with class scores for each pose with [0..1] range.
-    :param labels:       Array of shape [N] with class labels
-    :param bboxes_xyxy:  Array of shape [N, 4] with bounding boxes for each pose in XYXY format.
-                         Can be None if bounding boxes are not available (for instance, DEKR model does not output boxes).
+    :param poses:            Array of shape [N, 2] — piece keypoints (x, y) for labels 0–11.
+    :param scores:           Array of shape [N, C] with class scores for each piece.
+    :param labels:           Array of shape [N] with class labels (0–11, pieces only).
+    :param bboxes_xyxy:      Array of shape [N, 4] with piece bounding boxes in XYXY format.
+    :param board_keypoints:  Optional array [9, 2] — the 9 named board keypoints
+                             (a1, a8, h1, h8, center, a45, h45, 1de, 8de) from the
+                             top-1 board detection.  None if no board was detected.
+    :param board_confidence: Optional float — overall board detection confidence.
     """
 
     poses: Union[Tensor, np.ndarray]
     scores: Union[Tensor, np.ndarray]
     labels: Union[Tensor, np.ndarray]
     bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
+    board_keypoints: Optional[Union[Tensor, np.ndarray]] = None
+    board_confidence: Optional[float] = None
 
 
 class AbstractPoseEstimationPostPredictionCallback(abc.ABC):
