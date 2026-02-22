@@ -147,8 +147,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         assert gt_labels.ndim == gt_bboxes.ndim and gt_bboxes.ndim == 3
 
         batch_size, num_anchors, num_classes = pred_scores.shape
-        _, _, num_keypoints, _ = pred_pose_coords.shape
-        _, num_max_boxes, _ = gt_bboxes.shape
+        _, num_max_boxes, num_keypoints, _ = gt_poses.shape
 
         # negative batch
         if num_max_boxes == 0:
@@ -661,8 +660,9 @@ class ChessYoloNASPoseLoss(nn.Module):
                 piece_pose_coords = pred_pose_coords[is_piece]  # [N_piece, 1, 2]
                 piece_pose_logits = pred_pose_logits[is_piece].unsqueeze(-1)  # [N_piece, 1, 1]
 
-                gt_piece_pose_coords = assign_result.assigned_poses[..., 0:2][is_piece]  # [N_piece, J, 2]
-                gt_piece_pose_visibility = assign_result.assigned_poses[is_piece][:, :, 2:3]  # [N_piece, J, 1]
+                # Slice GT to first keypoint only (pieces only have 1 relevant keypoint, rest are padding zeros)
+                gt_piece_pose_coords = assign_result.assigned_poses[..., 0:2][is_piece][:, :1, :]  # [N_piece, 1, 2]
+                gt_piece_pose_visibility = assign_result.assigned_poses[is_piece][:, :1, 2:3]  # [N_piece, 1, 1]
 
                 piece_bboxes = assign_result.assigned_bboxes[is_piece]  # [N_piece, 4]
                 piece_area = self._xyxy_box_area(piece_bboxes).reshape([-1, 1]) * 0.53
@@ -676,7 +676,7 @@ class ChessYoloNASPoseLoss(nn.Module):
                     assigned_scores=piece_bbox_weight,
                     assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
                     area=piece_area,
-                    sigmas=self.oks_sigmas.to(pred_pose_logits.device),
+                    sigmas=self.oks_sigmas[:1].to(pred_pose_logits.device),
                 )
             else:
                 loss_pose_cls = torch.zeros([], device=pred_bboxes.device)

@@ -4,7 +4,7 @@ defaults:
 
 num_classes: 13
 num_joints: 9
-oks_sigmas: [0.5]
+oks_sigmas: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 board_oks_sigmas: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 flip_indexes: [0]
 edge_links: 

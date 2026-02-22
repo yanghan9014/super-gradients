@@ -34,7 +34,7 @@ criterion_params:
     board_reg_loss_weight: 34.0
     pose_classification_loss_type: focal
     rescale_pose_loss_with_assigned_score: True
-    assigner_multiply_by_pose_oks: True
+    assigner_multiply_by_pose_oks: False  # Disabled: piece branch has 1 kpt but GT has 9, causing OKS dim mismatch
 
 optimizer: AdamW
 optimizer_params:
