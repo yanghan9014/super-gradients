@@ -399,6 +399,12 @@ class _KeypointsPadding(Processing, ABC):
                 shift_h=-metadata.padding_coordinates.top,
                 shift_w=-metadata.padding_coordinates.left,
             )
+        if predictions.board_keypoints is not None:
+            predictions.board_keypoints = _shift_keypoints(
+                targets=predictions.board_keypoints,
+                shift_h=-metadata.padding_coordinates.top,
+                shift_w=-metadata.padding_coordinates.left,
+            )
         return predictions
 
     @abstractmethod
@@ -504,6 +510,12 @@ class KeypointsAutoPadding(AutoPadding):
                 shift_h=-metadata.padding_coordinates.top,
                 shift_w=-metadata.padding_coordinates.left,
             )
+        if predictions.board_keypoints is not None:
+            predictions.board_keypoints = _shift_keypoints(
+                targets=predictions.board_keypoints,
+                shift_h=-metadata.padding_coordinates.top,
+                shift_w=-metadata.padding_coordinates.left,
+            )
         return predictions
 
 
@@ -593,6 +605,8 @@ class KeypointsLongestMaxSizeRescale(_LongestMaxSizeRescale):
         predictions.poses = _rescale_keypoints(targets=predictions.poses, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         if predictions.bboxes_xyxy is not None:
             predictions.bboxes_xyxy = _rescale_bboxes(targets=predictions.bboxes_xyxy, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
+        if predictions.board_keypoints is not None:
+            predictions.board_keypoints = _rescale_keypoints(targets=predictions.board_keypoints, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         return predictions
 
 
@@ -602,6 +616,8 @@ class KeypointsRescale(_Rescale):
         predictions.poses = _rescale_keypoints(targets=predictions.poses, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         if predictions.bboxes_xyxy is not None:
             predictions.bboxes_xyxy = _rescale_bboxes(targets=predictions.bboxes_xyxy, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
+        if predictions.board_keypoints is not None:
+            predictions.board_keypoints = _rescale_keypoints(targets=predictions.board_keypoints, scale_factors=(1 / metadata.scale_factor_h, 1 / metadata.scale_factor_w))
         return predictions
 
 

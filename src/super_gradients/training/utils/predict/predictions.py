@@ -80,6 +80,8 @@ class PoseEstimationPrediction(Prediction):
     labels: np.ndarray
     bboxes_xyxy: Optional[np.ndarray]
     image_shape: Tuple[int, int]
+    board_keypoints: Optional[np.ndarray]
+    board_confidence: Optional[float]
 
     def __init__(
         self,
@@ -88,21 +90,18 @@ class PoseEstimationPrediction(Prediction):
         labels: np.ndarray,
         bboxes_xyxy: Optional[np.ndarray],
         image_shape: Tuple[int, int],
+        board_keypoints: Optional[np.ndarray] = None,
+        board_confidence: Optional[float] = None,
         **_,
     ):
-        """
-        :param poses:       Predicted poses as a numpy array of shape [Num Poses, 2]
-        :param scores:      Confidence scores for each pose [Num Poses]
-        :param labels:      Labels associated with each pose [Num Poses]
-        :param bboxes_xyxy:      Bounding boxes of each pose in xyxy format [Num Poses, 4]
-        :param image_shape: Shape of the image the prediction is made on, (H, W).
-        """
         self._validate_input(poses, scores, labels, bboxes_xyxy)
         self.poses = poses
         self.scores = scores
         self.labels = labels
         self.bboxes_xyxy = bboxes_xyxy
         self.image_shape = image_shape
+        self.board_keypoints = board_keypoints
+        self.board_confidence = board_confidence
 
     def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray, bboxes: Optional[np.ndarray]) -> None:
         if not isinstance(poses, np.ndarray):

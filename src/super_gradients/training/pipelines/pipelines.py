@@ -442,6 +442,8 @@ class PoseEstimationPipeline(Pipeline):
             pred_scores = getattr(image_level_predictions, "scores", None)
             pred_labels = getattr(image_level_predictions, "labels", None)
             pred_bboxes = getattr(image_level_predictions, "bboxes_xyxy", None)
+            pred_board_kpts = getattr(image_level_predictions, "board_keypoints", None)
+            pred_board_conf = getattr(image_level_predictions, "board_confidence", None)
 
             poses_np = pred_poses.cpu().numpy() if torch.is_tensor(pred_poses) else pred_poses
             if poses_np is None:
@@ -458,6 +460,10 @@ class PoseEstimationPipeline(Pipeline):
             if labels_np is None:
                 labels_np = np.zeros(len(poses_np), dtype=int)
 
+            board_kpts_np = pred_board_kpts.cpu().numpy() if torch.is_tensor(pred_board_kpts) else (
+                np.asarray(pred_board_kpts) if pred_board_kpts is not None else None
+            )
+
             decoded_predictions.append(
                 PoseEstimationPrediction(
                     poses=poses_np,
@@ -465,6 +471,8 @@ class PoseEstimationPipeline(Pipeline):
                     labels=labels_np,
                     bboxes_xyxy=bboxes_np,
                     image_shape=image.shape,
+                    board_keypoints=board_kpts_np,
+                    board_confidence=float(pred_board_conf) if pred_board_conf is not None else None,
                 )
             )
 
