@@ -84,15 +84,18 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
     superior performance that the original approach.
     """
 
-    def __init__(self, sigmas: Tensor, topk: int = 13, alpha: float = 1.0, beta=6.0, eps=1e-9, multiply_by_pose_oks: bool = False):
+    def __init__(self, sigmas: Tensor, topk: int = 13, alpha: float = 1.0, beta=6.0, eps=1e-9, multiply_by_pose_oks: bool = False,
+                 board_sigmas: Optional[Tensor] = None, board_class_id: int = -1):
         """
 
-        :param sigmas:               Sigmas for OKS calculation
+        :param sigmas:               Sigmas for OKS calculation (piece keypoints)
         :param topk:                 Maximum number of anchors that is selected for each gt box
         :param alpha:                Power factor for class probabilities of predicted boxes (Used compute alignment metric)
         :param beta:                 Power factor for IoU score of predicted boxes (Used compute alignment metric)
         :param eps:                  Small constant for numerical stability
         :param multiply_by_pose_oks: Whether to multiply alignment metric by pose OKS
+        :param board_sigmas:         Sigmas for board keypoint OKS calculation (9 keypoints)
+        :param board_class_id:       Class ID for the board (used to separate piece vs board OKS)
         """
         super().__init__()
         self.topk = topk
@@ -101,6 +104,8 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         self.eps = eps
         self.sigmas = sigmas
         self.multiply_by_pose_oks = multiply_by_pose_oks
+        self.board_sigmas = board_sigmas
+        self.board_class_id = board_class_id
 
     @torch.no_grad()
     def forward(
@@ -115,6 +120,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         gt_crowd: Tensor,
         pad_gt_mask: Tensor,
         bg_index: int,
+        pred_board_coords: Optional[Tensor] = None,
     ) -> YoloNASPoseYoloNASPoseBoxesAssignmentResult:
         """
         This code is based on https://github.com/fcjian/TOOD/blob/master/mmdet/core/bbox/assigners/task_aligned_assigner.py
@@ -171,7 +177,25 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         ious = batch_iou_similarity(gt_bboxes, pred_bboxes)
 
         if self.multiply_by_pose_oks:
-            pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device))
+            # Compute OKS per GT class: pieces (1 kp) vs board (9 kps)
+            gt_labels_squeezed_oks = gt_labels.squeeze(-1).long()  # [B, n]
+            is_board_gt = (gt_labels_squeezed_oks == self.board_class_id)  # [B, n]
+
+            # Piece OKS: use first keypoint only from both pred and GT
+            piece_gt = gt_poses[:, :, :1, :]  # [B, n, 1, 3]
+            piece_pred = pred_pose_coords[:, :, :1, :]  # [B, L, 1, 2]
+            piece_oks = batch_pose_oks(piece_gt, piece_pred, gt_bboxes, self.sigmas[:1].to(pred_pose_coords.device))  # [B, n, L]
+
+            # Board OKS: use all 9 keypoints from board head
+            if pred_board_coords is not None and self.board_sigmas is not None:
+                board_gt = gt_poses[:, :, :9, :]  # [B, n, 9, 3]
+                board_pred = pred_board_coords  # [B, L, 9, 2]
+                board_oks = batch_pose_oks(board_gt, board_pred, gt_bboxes, self.board_sigmas.to(pred_board_coords.device))  # [B, n, L]
+            else:
+                board_oks = piece_oks  # Fallback if no board head
+
+            # Merge: select board OKS for board GTs, piece OKS for piece GTs
+            pose_oks = torch.where(is_board_gt.unsqueeze(-1), board_oks, piece_oks)  # [B, n, L]
             ious = ious * pose_oks
 
         # # gather pred bboxes class score
@@ -346,6 +370,8 @@ class ChessYoloNASPoseLoss(nn.Module):
             alpha=bbox_assigned_alpha,
             beta=bbox_assigned_beta,
             multiply_by_pose_oks=assigner_multiply_by_pose_oks,
+            board_sigmas=self.board_oks_sigmas,
+            board_class_id=self.board_class_id,
         )
         self.pose_classification_loss_type = pose_classification_loss_type
         self.rescale_pose_loss_with_assigned_score = rescale_pose_loss_with_assigned_score
@@ -472,6 +498,7 @@ class ChessYoloNASPoseLoss(nn.Module):
             gt_crowd=gt_crowd,
             pad_gt_mask=pad_gt_mask,
             bg_index=self.num_classes,
+            pred_board_coords=pred_board_coords.detach(),
         )
 
         assigned_scores = assign_result.assigned_scores
