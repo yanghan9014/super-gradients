@@ -99,7 +99,7 @@ train_dataloader_params:
   dataset: ChessPoseEstimationDataset
   shuffle: True
   batch_size: 32
-  num_workers: 32
+  num_workers: 4
   drop_last: True
   pin_memory: False
   collate_fn: ChessYoloNASPoseCollateFN
@@ -107,7 +107,7 @@ train_dataloader_params:
 val_dataloader_params:
   dataset: ChessPoseEstimationDataset
   batch_size: 32
-  num_workers: 32
+  num_workers: 4
   drop_last: False
   pin_memory: False
   collate_fn: ChessYoloNASPoseCollateFN
