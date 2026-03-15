@@ -89,6 +89,10 @@ phase_callbacks:
       patience: 100
       verbose: True
 
+  - S3SyncCallback:
+      s3_bucket: "chessvision-checkpoints"
+      s3_prefix: "training_logs"
+
 pre_prediction_callback:
 
 metric_to_watch: 'AP'
