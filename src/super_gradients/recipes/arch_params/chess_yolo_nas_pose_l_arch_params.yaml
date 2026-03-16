@@ -13,28 +13,28 @@ backbone:
           num_blocks: 2
           activation_type: relu
           hidden_channels: 96
-          concat_intermediates: False
+          concat_intermediates: True
 
       - YoloNASStage:
           out_channels: 192
           num_blocks: 3
           activation_type: relu
           hidden_channels: 128
-          concat_intermediates: False
+          concat_intermediates: True
 
       - YoloNASStage:
           out_channels: 384
           num_blocks: 5
           activation_type: relu
           hidden_channels: 256
-          concat_intermediates: False
+          concat_intermediates: True
 
       - YoloNASStage:
           out_channels: 768
           num_blocks: 2
           activation_type: relu
           hidden_channels: 512
-          concat_intermediates: False
+          concat_intermediates: True
 
 
     context_module:
@@ -100,7 +100,7 @@ heads:
           pose_regression_blocks: 2
           shared_stem: False
           width_mult: 1
-          pose_conf_in_class_head: True
+          pose_conf_in_class_head: False
           pose_block_use_repvgg: False
           first_conv_group_size: 0
           num_classes:
@@ -115,7 +115,7 @@ heads:
           pose_regression_blocks: 2
           shared_stem: False
           width_mult: 1
-          pose_conf_in_class_head: True
+          pose_conf_in_class_head: False
           pose_block_use_repvgg: False
           first_conv_group_size: 0
           num_classes:
@@ -130,7 +130,7 @@ heads:
           pose_regression_blocks: 3
           shared_stem: False
           width_mult: 1
-          pose_conf_in_class_head: True
+          pose_conf_in_class_head: False
           pose_block_use_repvgg: False
           first_conv_group_size: 0
           num_classes:
