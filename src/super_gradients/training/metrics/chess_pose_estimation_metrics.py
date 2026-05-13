@@ -13,7 +13,7 @@ from super_gradients.common.registry.registry import register_metric
 from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback
 from super_gradients.module_interfaces.pose_estimation_post_prediction_callback import ChessPoseEstimationPredictions
 from super_gradients.training.metrics.pose_estimation_utils import compute_img_keypoint_matching, compute_visible_bbox_xywh
-from super_gradients.training.samples import ChessPoseEstimationSample, PoseEstimationSample
+from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.utils import convert_to_tensor
 from super_gradients.training.utils.detection_utils import compute_detection_metrics_per_cls
 
@@ -140,7 +140,7 @@ class ChessPoseEstimationMetrics(Metric):
         gt_joints: List[np.ndarray] = None,
         gt_bboxes: List[np.ndarray] = None,
         gt_areas: List[np.ndarray] = None,
-        gt_samples: List[Union[ChessPoseEstimationSample, PoseEstimationSample]] = None,
+        gt_samples: List[PoseEstimationSample] = None,
     ):
         """
         Decode the predictions and update the metric.
@@ -180,7 +180,7 @@ class ChessPoseEstimationMetrics(Metric):
             self._update_with_old_style_args(predictions, gt_joints, gt_bboxes, gt_areas)
 
     def _update_with_samples(
-        self, predictions: List[ChessPoseEstimationPredictions], gt_samples: List[Union[ChessPoseEstimationSample, PoseEstimationSample]]
+        self, predictions: List[ChessPoseEstimationPredictions], gt_samples: List[PoseEstimationSample]
     ) -> None:
         """
         Update internal state of metric class with a batch of predictions and groundtruth samples.
@@ -195,7 +195,7 @@ class ChessPoseEstimationMetrics(Metric):
                 gt_joints=gt_samples[i].joints,
                 gt_bboxes=gt_samples[i].bboxes_xywh,
                 gt_areas=gt_samples[i].areas,
-                gt_labels=getattr(gt_samples[i], "labels", None),
+                gt_labels=gt_samples[i].labels,
             )
 
     def _update_with_old_style_args(

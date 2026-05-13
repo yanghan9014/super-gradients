@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -6,7 +6,7 @@ from torch import Tensor
 from torch.utils.data.dataloader import default_collate
 
 from super_gradients.common.registry.registry import register_collate_function
-from super_gradients.training.samples import ChessPoseEstimationSample, PoseEstimationSample
+from super_gradients.training.samples import PoseEstimationSample
 from ..data_formats.bbox_formats.xywh import xywh_to_xyxy
 
 __all__ = ["YoloNASPoseCollateFN", "ChessYoloNASPoseCollateFN", "undo_flat_collate_tensors_with_batch_index", "flat_collate_tensors_with_batch_index"]
@@ -122,7 +122,7 @@ class ChessYoloNASPoseCollateFN(YoloNASPoseCollateFN):
         extras = {"gt_samples": batch}
         return all_images, (boxes, joints, class_labels), extras
 
-    def _get_targets(self, sample: Union[PoseEstimationSample, ChessPoseEstimationSample]) -> Tuple[Tensor, Tensor, Tensor]:
+    def _get_targets(self, sample: PoseEstimationSample) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Generate targets for training YoloNASPose from a single chess PoseEstimationSample
         :param sample: Input PoseEstimationSample
@@ -162,7 +162,7 @@ def undo_flat_collate_tensors_with_batch_index(flat_tensor: Tensor, batch_size: 
     """
     items = []
     batch_index_roi = [slice(None)] + [0] * (flat_tensor.ndim - 1)
-    batch_index = flat_tensor[batch_index_roi]
+    batch_index = flat_tensor[tuple(batch_index_roi)]
     for i in range(batch_size):
         mask = batch_index == i
         items.append(flat_tensor[mask][..., 1:])

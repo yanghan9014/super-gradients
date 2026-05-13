@@ -22,8 +22,6 @@ val_dataset_params:
   images_dir: images/val
   json_file: annotations/person_keypoints_val.json
 
-# mosaic_prob: 0.4
-
 train_dataloader_params:
   batch_size: 16
 

@@ -19,7 +19,7 @@ from super_gradients.training.datasets.pose_estimation_datasets.yolo_nas_pose_co
 
 
 @dataclasses.dataclass
-class YoloNASPoseYoloNASPoseBoxesAssignmentResult:
+class YoloNASPoseBoxesAssignmentResult:
     """
     This dataclass stores result of assignment of predicted boxes to ground truth boxes for YoloNASPose model.
     It produced by YoloNASPoseTaskAlignedAssigner and is used by YoloNASPoseLoss to compute the loss.
@@ -29,7 +29,7 @@ class YoloNASPoseYoloNASPoseBoxesAssignmentResult:
     :param assigned_labels: Tensor of shape (B, L) - Assigned gt labels for each anchor location
     :param assigned_bboxes: Tensor of shape (B, L, 4) - Assigned groundtruth boxes in XYXY format for each anchor location
     :param assigned_scores: Tensor of shape (B, L, C) - Assigned scores for each anchor location
-    :param assigned_poses: Tensor of shape (B, L, 17, 3) - Assigned groundtruth poses for each anchor location
+    :param assigned_poses: Tensor of shape (B, L, Num Joints, 3) - Assigned groundtruth poses for each anchor location
     :param assigned_gt_index: Tensor of shape (B, L) - Index of assigned groundtruth box for each anchor location
     :param assigned_crowd: Tensor of shape (B, L) - Whether the assigned groundtruth box is crowd
     """
@@ -115,7 +115,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         gt_crowd: Tensor,
         pad_gt_mask: Tensor,
         bg_index: int,
-    ) -> YoloNASPoseYoloNASPoseBoxesAssignmentResult:
+    ) -> YoloNASPoseBoxesAssignmentResult:
         """
         This code is based on https://github.com/fcjian/TOOD/blob/master/mmdet/core/bbox/assigners/task_aligned_assigner.py
 
@@ -159,7 +159,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             assigned_gt_index = torch.zeros([batch_size, num_anchors], dtype=torch.long, device=gt_labels.device)
             assigned_crowd = torch.zeros([batch_size, num_anchors], dtype=torch.bool, device=gt_labels.device)
 
-            return YoloNASPoseYoloNASPoseBoxesAssignmentResult(
+            return YoloNASPoseBoxesAssignmentResult(
                 assigned_labels=assigned_labels,
                 assigned_bboxes=assigned_bboxes,
                 assigned_scores=assigned_scores,
@@ -243,7 +243,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         assigned_crowd = assigned_crowd.reshape([batch_size, num_anchors])
         assigned_scores = assigned_scores * assigned_crowd.eq(0).unsqueeze(-1)
 
-        return YoloNASPoseYoloNASPoseBoxesAssignmentResult(
+        return YoloNASPoseBoxesAssignmentResult(
             assigned_labels=assigned_labels,
             assigned_bboxes=assigned_bboxes,
             assigned_scores=assigned_scores,
@@ -596,7 +596,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         pred_pose_logits,
         stride_tensor,
         anchor_points,
-        assign_result: YoloNASPoseYoloNASPoseBoxesAssignmentResult,
+        assign_result: YoloNASPoseBoxesAssignmentResult,
         assigned_scores_sum,
         reg_max: int,
     ):
@@ -609,25 +609,28 @@ class ChessYoloNASPoseLoss(nn.Module):
 
         # pos/neg loss
         if num_pos > 0:
-            # l1 + iou
             bbox_mask = mask_positive.unsqueeze(-1).tile([1, 1, 4])
-
-            pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
-            assigned_bboxes_pos = torch.masked_select(assigned_bboxes_divided_by_stride, bbox_mask).reshape([-1, 4])
-            assigned_bboxes_pos_image_coord = torch.masked_select(assign_result.assigned_bboxes, bbox_mask).reshape([-1, 4])
-
             bbox_weight = torch.masked_select(assign_result.assigned_scores.sum(-1), mask_positive).unsqueeze(-1)
 
-            loss_iou = self.iou_loss(pred_bboxes_pos, assigned_bboxes_pos) * bbox_weight
-            loss_iou = loss_iou.sum() / assigned_scores_sum
+            # CIoU loss — skip compute when weight is zero
+            if self.iou_loss_weight > 0:
+                pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
+                assigned_bboxes_pos = torch.masked_select(assigned_bboxes_divided_by_stride, bbox_mask).reshape([-1, 4])
+                loss_iou = (self.iou_loss(pred_bboxes_pos, assigned_bboxes_pos) * bbox_weight).sum() / assigned_scores_sum
+            else:
+                loss_iou = torch.zeros([], device=pred_bboxes.device)
 
-            dist_mask = mask_positive.unsqueeze(-1).tile([1, 1, (reg_max + 1) * 4])
-            pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, reg_max + 1])
-            assigned_ltrb = self._bbox2distance(anchor_points, assigned_bboxes_divided_by_stride, reg_max)
-            assigned_ltrb_pos = torch.masked_select(assigned_ltrb, bbox_mask).reshape([-1, 4])
-            loss_dfl = self._df_loss(pred_dist_pos, assigned_ltrb_pos) * bbox_weight
-            loss_dfl = loss_dfl.sum() / assigned_scores_sum
+            # DFL loss — skip compute when weight is zero
+            if self.dfl_loss_weight > 0:
+                dist_mask = mask_positive.unsqueeze(-1).tile([1, 1, (reg_max + 1) * 4])
+                pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, reg_max + 1])
+                assigned_ltrb = self._bbox2distance(anchor_points, assigned_bboxes_divided_by_stride, reg_max)
+                assigned_ltrb_pos = torch.masked_select(assigned_ltrb, bbox_mask).reshape([-1, 4])
+                loss_dfl = (self._df_loss(pred_dist_pos, assigned_ltrb_pos) * bbox_weight).sum() / assigned_scores_sum
+            else:
+                loss_dfl = torch.zeros([], device=pred_bboxes.device)
 
+            # Pose losses (keypoint regression + classification)
             # Do not divide poses by stride since this would skew the loss and make sigmas incorrect
             pred_pose_coords = pred_pose_coords[mask_positive]
             pred_pose_logits = pred_pose_logits[mask_positive].unsqueeze(-1)  # To make [Num Instances, Num Joints, 1]
@@ -635,6 +638,7 @@ class ChessYoloNASPoseLoss(nn.Module):
             gt_pose_coords = assign_result.assigned_poses[..., 0:2][mask_positive]
             gt_pose_visibility = assign_result.assigned_poses[mask_positive][:, :, 2:3]
 
+            assigned_bboxes_pos_image_coord = torch.masked_select(assign_result.assigned_bboxes, bbox_mask).reshape([-1, 4])
             area = self._xyxy_box_area(assigned_bboxes_pos_image_coord).reshape([-1, 1]) * 0.53
             loss_pose_reg, loss_pose_cls = self._keypoint_loss(
                 predicted_coords=pred_pose_coords,

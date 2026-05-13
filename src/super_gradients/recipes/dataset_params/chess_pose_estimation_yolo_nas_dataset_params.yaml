@@ -4,8 +4,9 @@ defaults:
 num_joints: 1
 
 # This is a shortcut parameter to set size of training & validation images.
-image_size: 640
-dataset_params_suffix: "${dataset_params.image_size}"
+image_width: 640
+image_height: 480
+dataset_params_suffix: "${dataset_params.image_width}x${dataset_params.image_height}"
 
 train_dataset_params:
   data_dir: /data/coco # root path to coco data
@@ -45,16 +46,34 @@ train_dataset_params:
         prob: 0.75
         interpolation_mode: [0, 1, 2, 3, 4]
     
-    # - KeypointsMosaic:
-    #     prob: ${dataset_params.mosaic_prob}
+    - Albumentations:
+        Compose:
+          transforms:
+            - GaussianBlur:
+                blur_limit: [3, 7]
+                p: 0.2
+            - GaussNoise:
+                var_limit: [10.0, 50.0]
+                p: 0.2
+            - ImageCompression:
+                quality_lower: 50
+                quality_upper: 95
+                p: 0.2
+          keypoint_params: 
+          bbox_params:
+            min_area: 0.0
+            min_visibility: 0.0
+            min_width: 0.0
+            min_height: 0.0
+            check_each_transform: False
 
     - KeypointsLongestMaxSize:
-        max_height: ${dataset_params.image_size}
-        max_width: ${dataset_params.image_size}
+        max_height: ${dataset_params.image_height}
+        max_width: ${dataset_params.image_width}
 
     - KeypointsPadIfNeeded:
-        min_height: ${dataset_params.image_size}
-        min_width: ${dataset_params.image_size}
+        min_height: ${dataset_params.image_height}
+        min_width: ${dataset_params.image_width}
         image_pad_value: [127, 127, 127]
         mask_pad_value: 1
         padding_mode: center
@@ -81,12 +100,12 @@ val_dataset_params:
 
   transforms:
     - KeypointsLongestMaxSize:
-        max_height: ${dataset_params.image_size}
-        max_width: ${dataset_params.image_size}
+        max_height: ${dataset_params.image_height}
+        max_width: ${dataset_params.image_width}
 
     - KeypointsPadIfNeeded:
-        min_height: ${dataset_params.image_size}
-        min_width: ${dataset_params.image_size}
+        min_height: ${dataset_params.image_height}
+        min_width: ${dataset_params.image_width}
         image_pad_value: 127
         mask_pad_value: 1
         padding_mode: bottom_right

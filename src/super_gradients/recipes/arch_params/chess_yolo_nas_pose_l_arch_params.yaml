@@ -88,7 +88,7 @@ neck:
 
 heads:
   ChessYoloNASPoseNDFLHeads:
-    num_classes: 17
+    num_classes: 21  # 21 chess categories (12 piece types + 9 board landmarks)
     reg_max: 16
     # pose_offset_multiplier: 1.0
     # compensate_grid_cell_offset: True

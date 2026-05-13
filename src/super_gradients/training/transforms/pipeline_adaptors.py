@@ -48,53 +48,8 @@ class AlbumentationsAdaptor(TransformsPipelineAdaptorBase):
             self.sample_type = SampleType.DEPTH_ESTIMATION
         elif isinstance(sample, PoseEstimationSample):
             self.sample_type = SampleType.POSE_ESTIMATION
-
-            if self.composed_transforms.to_dict()["transform"].get("keypoint_params") is None:
-
-                example_str = (
-                    ""
-                    "   > transforms:\n"
-                    "   >    - Albumentations:\n"
-                    "   >        Compose:\n"
-                    "   >            transforms:\n"
-                    "   >                - ...:\n"
-                    "   >            keypoint_params: # Leave this empty\n"
-                )
-                raise ValueError(f"`keypoint_params` is required for `PoseEstimationSample`. You can set it like this :\n{example_str}")
-
-            from albumentations.augmentations import HorizontalFlip
-
-            if any(isinstance(t, HorizontalFlip) for t in self.composed_transforms):
-                before_str = (
-                    ""
-                    "   > transforms:\n"
-                    "   >    - Albumentations:\n"
-                    "   >        Compose:\n"
-                    "   >            transforms:\n"
-                    "   >                - HorizontalFlip:\n"
-                    "   >                    p: 1\n"
-                )
-
-                after_str = (
-                    ""
-                    "   > transforms:\n"
-                    "   >    - KeypointsRandomHorizontalFlip:\n"
-                    "   >        prob: 1\n"
-                    "   >        flip_index: [ 0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]\n"
-                    "   >        # Note: these indexes are COCO-specific. If you're using a different dataset, you will need to change these accordingly.\n"
-                    "   >        # The `flip_index` array defines pairs of keypoints to exchange during a horizontal flip. "
-                    "This ensures accurate mapping of corresponding keypoints on mirrored body parts after flipping."
-                )
-
-                raise TypeError(
-                    "`HorizontalFlip` from Albumentation is not supported. "
-                    "Please use the `KeypointsRandomHorizontalFlip` from SuperGradients instead.\n"
-                    "Note: You should set it like other SuperGradients transforms, and not like other Albumentations.\n\n"
-                    "Example:\n\n"
-                    f"FROM \n{before_str}\n"
-                    f"TO \n{after_str}\n\n"
-                )
-
+            self._original_sample_type = type(sample)
+            self._validate_pose_transforms()
         else:
             self.sample_type = SampleType.IMAGE_ONLY
 
@@ -102,6 +57,54 @@ class AlbumentationsAdaptor(TransformsPipelineAdaptorBase):
         sample = self.composed_transforms(**sample)  # Apply albumentation compose
         sample = self.post_transforms_processing(sample)
         return sample
+
+    def _validate_pose_transforms(self):
+        """Validate that the Albumentations compose has the required settings for pose estimation."""
+        if self.composed_transforms.to_dict()["transform"].get("keypoint_params") is None:
+
+            example_str = (
+                ""
+                "   > transforms:\n"
+                "   >    - Albumentations:\n"
+                "   >        Compose:\n"
+                "   >            transforms:\n"
+                "   >                - ...:\n"
+                "   >            keypoint_params: # Leave this empty\n"
+            )
+            raise ValueError(f"`keypoint_params` is required for `PoseEstimationSample`. You can set it like this :\n{example_str}")
+
+        from albumentations.augmentations import HorizontalFlip
+
+        if any(isinstance(t, HorizontalFlip) for t in self.composed_transforms):
+            before_str = (
+                ""
+                "   > transforms:\n"
+                "   >    - Albumentations:\n"
+                "   >        Compose:\n"
+                "   >            transforms:\n"
+                "   >                - HorizontalFlip:\n"
+                "   >                    p: 1\n"
+            )
+
+            after_str = (
+                ""
+                "   > transforms:\n"
+                "   >    - KeypointsRandomHorizontalFlip:\n"
+                "   >        prob: 1\n"
+                "   >        flip_index: [ 0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]\n"
+                "   >        # Note: these indexes are COCO-specific. If you're using a different dataset, you will need to change these accordingly.\n"
+                "   >        # The `flip_index` array defines pairs of keypoints to exchange during a horizontal flip. "
+                "This ensures accurate mapping of corresponding keypoints on mirrored body parts after flipping."
+            )
+
+            raise TypeError(
+                "`HorizontalFlip` from Albumentation is not supported. "
+                "Please use the `KeypointsRandomHorizontalFlip` from SuperGradients instead.\n"
+                "Note: You should set it like other SuperGradients transforms, and not like other Albumentations.\n\n"
+                "Example:\n\n"
+                f"FROM \n{before_str}\n"
+                f"TO \n{after_str}\n\n"
+            )
 
     def apply_to_sample(self, sample):
         return self(sample=sample)
@@ -116,13 +119,17 @@ class AlbumentationsAdaptor(TransformsPipelineAdaptorBase):
         elif self.sample_type == SampleType.POSE_ESTIMATION:
 
             bboxes_xyxy = xywh_to_xyxy(bboxes=np.array(sample.bboxes_xywh), image_shape=sample.image.shape)
+            # Fix zero-width or zero-height bboxes to prevent Albumentations from crashing
+            bboxes_xyxy[:, 2] = np.maximum(bboxes_xyxy[:, 0] + 1e-3, bboxes_xyxy[:, 2])
+            bboxes_xyxy[:, 3] = np.maximum(bboxes_xyxy[:, 1] + 1e-3, bboxes_xyxy[:, 3])
+            self._real_labels = sample.labels
 
             sample = {
                 "image": sample.image,
                 "bboxes": bboxes_xyxy,
                 "labels": np.arange(sample.bboxes_xywh.shape[0]),  # Dummy value, this is required for Albumentation. Here, all classes are the same.
                 "mask": np.array(sample.mask),
-                "is_crowd": sample.is_crowd,
+                "is_crowd": sample.is_crowd if sample.is_crowd is not None else np.zeros(sample.bboxes_xywh.shape[0], dtype=bool),
                 "keypoints": sample.joints.reshape(sample.joints.shape[0] * sample.joints.shape[1], 3),  # xy
                 "n_joints": sample.joints.shape[1],  # Hold
             }
@@ -167,15 +174,15 @@ class AlbumentationsAdaptor(TransformsPipelineAdaptorBase):
 
             # Remove the objects associated with a bbox that was removed.
             keypoints = keypoints[sample["labels"]]
+            surviving_labels = self._real_labels[sample["labels"]] if self._real_labels is not None else None
 
-            sample = PoseEstimationSample(
+            sample = self._original_sample_type(
                 image=sample["image"],
                 mask=np.array(sample["mask"]),
                 joints=keypoints,
-                areas=None,
                 bboxes_xywh=bboxes_xywh,
                 is_crowd=np.array(sample["is_crowd"]),
-                additional_samples=None,
+                labels=surviving_labels,
             )
             sample = sample.sanitize_sample()
         else:

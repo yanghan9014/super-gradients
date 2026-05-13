@@ -18,7 +18,6 @@ class PoseEstimationSample:
     It contains both input image and target information to train a pose estimation model.
 
     :param image:              Associated image with a sample. Can be in [H,W,C] or [C,H,W] format
-    :param image_layout:       Layout of the image (HWC or CHW)
     :param mask:               Target mask in [H,W] format
     :param joints:             Target joints in [NumInstances, NumJoints, 3] format.
                                Last dimension contains (x,y,visibility) for each joint.
@@ -26,19 +25,19 @@ class PoseEstimationSample:
                                Note this is not a bbox area, but area of the object itself.
                                One may use a heuristic `0.53 * box area` as object area approximation if this is not provided.
     :param bboxes_xywh:        (Optional) Numpy array of [N,4] shape with bounding box of each instance (XYWH)
-    :param additional_samples: (Optional) List of additional samples for the same image.
     :param is_crowd:           (Optional) Numpy array of [N] shape with is_crowd flag for each instance
+    :param labels:             (Optional) Numpy array of [N] shape with class label for each instance
+    :param additional_samples: (Optional) List of additional samples for the same image.
     """
-
-    __slots__ = ["image", "mask", "joints", "areas", "bboxes_xywh", "is_crowd", "additional_samples"]
 
     image: Union[np.ndarray, torch.Tensor]
     mask: Union[np.ndarray, torch.Tensor]
     joints: np.ndarray
-    areas: Optional[np.ndarray]
-    bboxes_xywh: Optional[np.ndarray]
-    is_crowd: Optional[np.ndarray]
-    additional_samples: Optional[List["PoseEstimationSample"]]
+    areas: Optional[np.ndarray] = None
+    bboxes_xywh: Optional[np.ndarray] = None
+    is_crowd: Optional[np.ndarray] = None
+    labels: Optional[np.ndarray] = None
+    additional_samples: Optional[List["PoseEstimationSample"]] = None
 
     @classmethod
     def compute_area_of_joints_bounding_box(cls, joints) -> np.ndarray:
@@ -107,7 +106,10 @@ class PoseEstimationSample:
         :return:       A pose sample after filtering.
         """
         self.joints = self.joints[mask]
-        self.is_crowd = self.is_crowd[mask]
+        if self.is_crowd is not None:
+            self.is_crowd = self.is_crowd[mask]
+        if self.labels is not None:
+            self.labels = self.labels[mask]
         if self.bboxes_xywh is not None:
             self.bboxes_xywh = self.bboxes_xywh[mask]
         if self.areas is not None:
