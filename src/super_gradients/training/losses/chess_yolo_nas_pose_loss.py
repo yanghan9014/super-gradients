@@ -42,7 +42,16 @@ class YoloNASPoseBoxesAssignmentResult:
     assigned_crowd: Tensor
 
 
-def batch_pose_oks(gt_keypoints: torch.Tensor, pred_keypoints: torch.Tensor, gt_bboxes_xyxy: torch.Tensor, sigmas: torch.Tensor, eps: float = 1e-9) -> float:
+def batch_pose_oks(
+    gt_keypoints: torch.Tensor,
+    pred_keypoints: torch.Tensor,
+    gt_bboxes_xyxy: torch.Tensor,
+    sigmas: torch.Tensor,
+    eps: float = 1e-9,
+    gt_labels: Optional[torch.Tensor] = None,
+    board_class_id: int = 12,
+    piece_sigma: Optional[torch.Tensor] = None,
+) -> Tensor:
     """
     Calculate batched OKS (Object Keypoint Similarity) between two sets of keypoints.
 
@@ -57,14 +66,35 @@ def batch_pose_oks(gt_keypoints: torch.Tensor, pred_keypoints: torch.Tensor, gt_
     joints1_xy = gt_keypoints[:, :, :, 0:2].unsqueeze(2)  # [N, M1, 1, Num Joints, 2]
     joints2_xy = pred_keypoints[:, :, :, 0:2].unsqueeze(1)  # [N, 1, M2, Num Joints, 2]
 
-    d = ((joints1_xy - joints2_xy) ** 2).sum(dim=-1, keepdim=False)  # [N, M1, M2, Num Joints]
-
     # Infer pose area from bbox area * 0.53 (COCO heuristic)
     area = (gt_bboxes_xyxy[:, :, 2] - gt_bboxes_xyxy[:, :, 0]) * (gt_bboxes_xyxy[:, :, 3] - gt_bboxes_xyxy[:, :, 1]) * 0.53  # [N, M1]
     area = area[:, :, None, None]  # [N, M1, 1, 1]
-    sigmas = sigmas.reshape([1, 1, 1, -1])  # [1, 1, 1, Num Keypoints]
 
-    e: Tensor = d / (2 * sigmas) ** 2 / (area + eps) / 2
+    if gt_labels is not None and piece_sigma is not None:
+        e = torch.zeros(joints1_xy.shape[0], joints1_xy.shape[1], joints2_xy.shape[2], joints1_xy.shape[3], device=joints1_xy.device)
+        board_mask = (gt_labels.squeeze(-1) == board_class_id)
+        
+        if board_mask.any():
+            j1 = joints1_xy[board_mask]
+            j2 = joints2_xy.expand(-1, board_mask.shape[1], -1, -1, -1)[board_mask]
+            d = ((j1 - j2) ** 2).sum(dim=-1)
+            a = area.expand(-1, -1, joints2_xy.shape[2], -1)[board_mask].squeeze(-1).unsqueeze(-1)
+            sig = sigmas.reshape(1, 1, -1)
+            e[board_mask] = d / (2 * sig) ** 2 / (a + eps) / 2
+            
+        piece_mask = ~board_mask
+        if piece_mask.any():
+            j1 = joints1_xy[piece_mask][:, :, 0:1, :]
+            j2 = joints2_xy.expand(-1, piece_mask.shape[1], -1, -1, -1)[piece_mask][:, :, 0:1, :]
+            d = ((j1 - j2) ** 2).sum(dim=-1)
+            a = area.expand(-1, -1, joints2_xy.shape[2], -1)[piece_mask].squeeze(-1).unsqueeze(-1)
+            sig = piece_sigma.reshape(1, 1, 1)
+            e[piece_mask, :, 0:1] = d / (2 * sig) ** 2 / (a + eps) / 2
+    else:
+        d = ((joints1_xy - joints2_xy) ** 2).sum(dim=-1, keepdim=False)  # [N, M1, M2, Num Joints]
+        sigmas = sigmas.reshape([1, 1, 1, -1])  # [1, 1, 1, Num Keypoints]
+        e = d / (2 * sigmas) ** 2 / (area + eps) / 2
+
     oks = torch.exp(-e)  # [N, M1, M2, Num Keypoints]
 
     joints1_visiblity = gt_keypoints[:, :, :, 2].gt(0).float().unsqueeze(2)  # [N, M1, 1, Num Keypoints]
@@ -84,7 +114,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
     superior performance that the original approach.
     """
 
-    def __init__(self, sigmas: Tensor, topk: int = 13, alpha: float = 1.0, beta=6.0, eps=1e-9, multiply_by_pose_oks: bool = False):
+    def __init__(self, sigmas: Tensor, topk: int = 13, alpha: float = 1.0, beta=6.0, eps=1e-9, multiply_by_pose_oks: bool = False, piece_sigma: Optional[Tensor] = None, board_class_id: int = 12):
         """
 
         :param sigmas:               Sigmas for OKS calculation
@@ -101,6 +131,8 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         self.eps = eps
         self.sigmas = sigmas
         self.multiply_by_pose_oks = multiply_by_pose_oks
+        self.piece_sigma = piece_sigma
+        self.board_class_id = board_class_id
 
     @torch.no_grad()
     def forward(
@@ -172,7 +204,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         ious = batch_iou_similarity(gt_bboxes, pred_bboxes)
 
         if self.multiply_by_pose_oks:
-            pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device))
+            pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device), eps=self.eps, gt_labels=gt_labels, board_class_id=self.board_class_id, piece_sigma=self.piece_sigma.to(pred_pose_coords.device) if self.piece_sigma is not None else None)
             ious = ious * pose_oks
 
         # # gather pred bboxes class score
@@ -295,7 +327,7 @@ class ChessYoloNASPoseLoss(nn.Module):
 
     def __init__(
         self,
-        oks_sigmas: Union[List[float], np.ndarray, Tensor],
+        oks_sigmas: Optional[Union[List[float], np.ndarray, Tensor]] = None,
         classification_loss_type: str = "focal",
         regression_iou_loss_type: str = "ciou",
         classification_loss_weight: float = 1.0,
@@ -311,6 +343,10 @@ class ChessYoloNASPoseLoss(nn.Module):
         assigner_multiply_by_pose_oks: bool = False,
         rescale_pose_loss_with_assigned_score: bool = False,
         average_losses_in_ddp: bool = False,
+        board_oks_sigmas: Optional[Union[List[float], np.ndarray, Tensor]] = None,
+        piece_oks_sigma: Optional[Union[List[float], np.ndarray, Tensor]] = None,
+        board_class_id: int = 12,
+        board_localization_loss_multiplier: float = 1.0,
     ):
         """
         :param oks_sigmas:                 OKS sigmas for pose estimation. Array of [Num Keypoints].
@@ -327,15 +363,22 @@ class ChessYoloNASPoseLoss(nn.Module):
                                            However, it needs to be proven empirically.
         """
         super().__init__()
+        
+        if board_oks_sigmas is None and oks_sigmas is not None:
+            board_oks_sigmas = oks_sigmas
+            
         self.classification_loss_type = classification_loss_type
         self.classification_loss_weight = classification_loss_weight
         self.dfl_loss_weight = dfl_loss_weight
         self.iou_loss_weight = iou_loss_weight
 
         self.iou_loss = {"giou": GIoULoss, "ciou": CIoULoss}[regression_iou_loss_type]()
-        self.num_keypoints = len(oks_sigmas)
+        self.num_keypoints = len(board_oks_sigmas)
         self.num_classes = num_classes
-        self.oks_sigmas = torch.tensor(oks_sigmas)
+        self.oks_sigmas = torch.tensor(board_oks_sigmas)
+        self.piece_oks_sigma = torch.tensor(piece_oks_sigma) if piece_oks_sigma is not None else None
+        self.board_class_id = board_class_id
+        self.board_localization_loss_multiplier = board_localization_loss_multiplier
         self.pose_cls_loss_weight = pose_cls_loss_weight
         self.pose_reg_loss_weight = pose_reg_loss_weight
         self.assigner = YoloNASPoseTaskAlignedAssigner(
@@ -344,6 +387,8 @@ class ChessYoloNASPoseLoss(nn.Module):
             alpha=bbox_assigned_alpha,
             beta=bbox_assigned_beta,
             multiply_by_pose_oks=assigner_multiply_by_pose_oks,
+            piece_sigma=self.piece_oks_sigma,
+            board_class_id=self.board_class_id,
         )
         self.pose_classification_loss_type = pose_classification_loss_type
         self.rescale_pose_loss_with_assigned_score = rescale_pose_loss_with_assigned_score
@@ -609,6 +654,11 @@ class ChessYoloNASPoseLoss(nn.Module):
 
         # pos/neg loss
         if num_pos > 0:
+            assigned_labels_pos = assign_result.assigned_labels[mask_positive]
+            localization_multiplier = torch.ones_like(assigned_labels_pos, dtype=pred_bboxes.dtype).unsqueeze(-1)
+            if self.board_localization_loss_multiplier != 1.0:
+                localization_multiplier[assigned_labels_pos == self.board_class_id] = self.board_localization_loss_multiplier
+
             bbox_mask = mask_positive.unsqueeze(-1).tile([1, 1, 4])
             bbox_weight = torch.masked_select(assign_result.assigned_scores.sum(-1), mask_positive).unsqueeze(-1)
 
@@ -616,7 +666,10 @@ class ChessYoloNASPoseLoss(nn.Module):
             if self.iou_loss_weight > 0:
                 pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
                 assigned_bboxes_pos = torch.masked_select(assigned_bboxes_divided_by_stride, bbox_mask).reshape([-1, 4])
-                loss_iou = (self.iou_loss(pred_bboxes_pos, assigned_bboxes_pos) * bbox_weight).sum() / assigned_scores_sum
+                iou_loss_raw = self.iou_loss(pred_bboxes_pos, assigned_bboxes_pos)
+                if iou_loss_raw.dim() == 1 and bbox_weight.dim() == 2:
+                    iou_loss_raw = iou_loss_raw.unsqueeze(-1)
+                loss_iou = (iou_loss_raw * bbox_weight * localization_multiplier).sum() / assigned_scores_sum
             else:
                 loss_iou = torch.zeros([], device=pred_bboxes.device)
 
@@ -626,7 +679,10 @@ class ChessYoloNASPoseLoss(nn.Module):
                 pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, reg_max + 1])
                 assigned_ltrb = self._bbox2distance(anchor_points, assigned_bboxes_divided_by_stride, reg_max)
                 assigned_ltrb_pos = torch.masked_select(assigned_ltrb, bbox_mask).reshape([-1, 4])
-                loss_dfl = (self._df_loss(pred_dist_pos, assigned_ltrb_pos) * bbox_weight).sum() / assigned_scores_sum
+                dfl_loss_raw = self._df_loss(pred_dist_pos, assigned_ltrb_pos)
+                if dfl_loss_raw.dim() == 1 and bbox_weight.dim() == 2:
+                    dfl_loss_raw = dfl_loss_raw.unsqueeze(-1)
+                loss_dfl = (dfl_loss_raw * bbox_weight * localization_multiplier).sum() / assigned_scores_sum
             else:
                 loss_dfl = torch.zeros([], device=pred_bboxes.device)
 
@@ -640,16 +696,61 @@ class ChessYoloNASPoseLoss(nn.Module):
 
             assigned_bboxes_pos_image_coord = torch.masked_select(assign_result.assigned_bboxes, bbox_mask).reshape([-1, 4])
             area = self._xyxy_box_area(assigned_bboxes_pos_image_coord).reshape([-1, 1]) * 0.53
-            loss_pose_reg, loss_pose_cls = self._keypoint_loss(
-                predicted_coords=pred_pose_coords,
-                target_coords=gt_pose_coords,
-                predicted_logits=pred_pose_logits,
-                target_visibility=gt_pose_visibility,
-                assigned_scores=bbox_weight if self.rescale_pose_loss_with_assigned_score else None,
-                assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
-                area=area,
-                sigmas=self.oks_sigmas.to(pred_pose_logits.device),
-            )
+            assigned_labels_pos = assign_result.assigned_labels[mask_positive]
+
+            if self.piece_oks_sigma is not None:
+                mask_board = (assigned_labels_pos == self.board_class_id)
+                mask_pieces = ~mask_board
+                
+                loss_pose_reg = torch.zeros([], device=pred_bboxes.device)
+                loss_pose_cls = torch.zeros([], device=pred_bboxes.device)
+                
+                reg_b, cls_b, reg_p, cls_p = 0.0, 0.0, 0.0, 0.0
+
+                if mask_board.any():
+                    reg_b, cls_b = self._keypoint_loss(
+                        predicted_coords=pred_pose_coords[mask_board],
+                        target_coords=gt_pose_coords[mask_board],
+                        predicted_logits=pred_pose_logits[mask_board],
+                        target_visibility=gt_pose_visibility[mask_board],
+                        assigned_scores=bbox_weight[mask_board] if self.rescale_pose_loss_with_assigned_score else None,
+                        assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
+                        area=area[mask_board],
+                        sigmas=self.oks_sigmas.to(pred_pose_logits.device),
+                    )
+                    loss_pose_reg += reg_b * self.board_localization_loss_multiplier
+                    loss_pose_cls += cls_b
+
+                if mask_pieces.any():
+                    reg_p, cls_p = self._keypoint_loss(
+                        predicted_coords=pred_pose_coords[mask_pieces][:, 0:1, :],
+                        target_coords=gt_pose_coords[mask_pieces][:, 0:1, :],
+                        predicted_logits=pred_pose_logits[mask_pieces][:, 0:1, :],
+                        target_visibility=gt_pose_visibility[mask_pieces][:, 0:1, :],
+                        assigned_scores=bbox_weight[mask_pieces] if self.rescale_pose_loss_with_assigned_score else None,
+                        assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
+                        area=area[mask_pieces],
+                        sigmas=self.piece_oks_sigma.to(pred_pose_logits.device),
+                    )
+                    loss_pose_reg += reg_p
+                    loss_pose_cls += cls_p
+                    
+                if not self.rescale_pose_loss_with_assigned_score:
+                    total_instances = len(assigned_labels_pos)
+                    loss_pose_reg = (reg_b * mask_board.sum() * self.board_localization_loss_multiplier + reg_p * mask_pieces.sum()) / total_instances
+                    loss_pose_cls = (cls_b * mask_board.sum() + cls_p * mask_pieces.sum()) / total_instances
+
+            else:
+                loss_pose_reg, loss_pose_cls = self._keypoint_loss(
+                    predicted_coords=pred_pose_coords,
+                    target_coords=gt_pose_coords,
+                    predicted_logits=pred_pose_logits,
+                    target_visibility=gt_pose_visibility,
+                    assigned_scores=bbox_weight if self.rescale_pose_loss_with_assigned_score else None,
+                    assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
+                    area=area,
+                    sigmas=self.oks_sigmas.to(pred_pose_logits.device),
+                )
         else:
             loss_iou = torch.zeros([], device=pred_bboxes.device)
             loss_dfl = torch.zeros([], device=pred_bboxes.device)

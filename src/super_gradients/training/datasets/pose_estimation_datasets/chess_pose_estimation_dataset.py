@@ -129,7 +129,9 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
             # But we generaly want to read with OpenCV since it's much faster than PIL
             from PIL import Image
 
-            orig_image = Image.open(ann.image_path).convert("BGR")
+            orig_image = np.array(Image.open(ann.image_path).convert("RGB"))
+        else:
+            orig_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
 
         image_height, image_width = orig_image.shape[:2]
         if image_height != ann.image_height or image_width != ann.image_width:
@@ -180,9 +182,8 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         This method returns a dictionary of parameters describing preprocessing steps to be applied to the dataset.
         :return:
         """
-        rgb_to_bgr = {Processings.ReverseImageChannels: {}}
         image_to_tensor = {Processings.ImagePermute: {"permutation": (2, 0, 1)}}
-        pipeline = [rgb_to_bgr] + self.transforms.get_equivalent_preprocessing() + [image_to_tensor]
+        pipeline = self.transforms.get_equivalent_preprocessing() + [image_to_tensor]
         params = dict(
             conf=0.05,
             image_processor={Processings.ComposeProcessing: {"processings": pipeline}},

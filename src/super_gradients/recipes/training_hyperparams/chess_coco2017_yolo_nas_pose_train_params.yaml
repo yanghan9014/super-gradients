@@ -7,7 +7,7 @@ warmup_initial_lr:  1e-6
 lr_warmup_steps: 128
 lr_warmup_epochs: 10
 
-initial_lr:  2e-5
+initial_lr:  2e-3
 lr_mode: cosine
 cosine_final_lr_ratio: 0.05
 
@@ -20,23 +20,21 @@ save_ckpt_epoch_list: [300, 500]
 loss: chess_yolo_nas_pose_loss
 
 criterion_params:
-    oks_sigmas: ${dataset_params.oks_sigmas}
+    board_oks_sigmas: ${dataset_params.board_oks_sigmas}
+    piece_oks_sigma: ${dataset_params.piece_oks_sigma}
+    board_class_id: 12
     num_classes: ${dataset_params.num_classes}
-    classification_loss_weight: 20.0
+    classification_loss_weight: 5.0
     classification_loss_type: focal
     regression_iou_loss_type: ciou
-    iou_loss_weight: 2.5       # Zeroed: dummy 64×64 bboxes are synthetic, no real bbox to regress
-    dfl_loss_weight: 0.0       # Zeroed: same reason as iou_loss_weight
-    pose_cls_loss_weight: 0.0  # Zeroed: single keypoint is always visible (vis=2), making this degenerate
-
-    # dfl_loss_weight: 0.01
-    # pose_cls_loss_weight: 1.0
-
-    pose_reg_loss_weight: 34.0
-    # board_reg_loss_weight: 0.001
+    iou_loss_weight: 7.5
+    dfl_loss_weight: 0.01
+    pose_cls_loss_weight: 1.0
+    pose_reg_loss_weight: 50.0
     pose_classification_loss_type: focal
     rescale_pose_loss_with_assigned_score: True
     assigner_multiply_by_pose_oks: True
+    # board_localization_loss_multiplier: 5.0
 
 optimizer: AdamW
 optimizer_params:

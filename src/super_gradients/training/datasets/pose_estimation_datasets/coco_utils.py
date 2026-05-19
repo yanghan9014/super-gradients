@@ -168,22 +168,33 @@ def parse_coco_into_multiclass_keypoints_annotations(
     # if len(coco["categories"]) != 1:
     #     raise ValueError("Dataset must contain exactly one category")
 
-    # Extract class names and keypoint schema (all categories must share the same schema and order)
+    # Extract class names and keypoint schema.
+    # Categories may have different numbers of keypoints (e.g. pieces=1, board=9).
+    # We pad all annotations to the maximum keypoint count.
     category_names = [ca["name"] for ca in coco["categories"]]
     category_keypoints = [ca["keypoints"] for ca in coco["categories"]]
-    keypoints_lengths = {len(kps) for kps in category_keypoints}
-    if len(keypoints_lengths) != 1:
-        raise ValueError("All categories must have the same number of keypoints")
-    if any(kps != category_keypoints[0] for kps in category_keypoints[1:]):
-        raise ValueError("All categories must share the same keypoint order")
+    category_num_kps = {cat["id"]: len(cat["keypoints"]) for cat in coco["categories"]}
+    max_num_keypoints = max(len(kps) for kps in category_keypoints)
 
-    keypoints = category_keypoints[0]
-    num_keypoints = len(keypoints)
+    # Use the keypoint names from the category with the most keypoints
+    keypoints = max(category_keypoints, key=len)
+    num_keypoints = max_num_keypoints
     category_id_to_index = {cat["id"]: idx for idx, cat in enumerate(coco["categories"])}
 
     # Extract box annotations
     ann_box_xyxy = xywh_to_xyxy_inplace(np.array([annotation["bbox"] for annotation in coco["annotations"]], dtype=np.float32), image_shape=None)
-    ann_keypoints = np.stack([np.array(annotation["keypoints"], dtype=np.float32).reshape(num_keypoints, 3) for annotation in coco["annotations"]])
+
+    # Parse keypoints, padding to max_num_keypoints for categories with fewer
+    ann_keypoints_list = []
+    for annotation in coco["annotations"]:
+        raw_kps_flat = annotation["keypoints"]
+        ann_nkp = len(raw_kps_flat) // 3  # actual keypoints in this annotation
+        raw_kps = np.array(raw_kps_flat, dtype=np.float32).reshape(ann_nkp, 3)
+        if ann_nkp < max_num_keypoints:
+            padding = np.zeros((max_num_keypoints - ann_nkp, 3), dtype=np.float32)
+            raw_kps = np.concatenate([raw_kps, padding], axis=0)
+        ann_keypoints_list.append(raw_kps)
+    ann_keypoints = np.stack(ann_keypoints_list)
 
     ann_image_ids = np.array([annotation["image_id"] for annotation in coco["annotations"]], dtype=int)
     ann_category_ids = np.array([annotation["category_id"] for annotation in coco["annotations"]], dtype=int)
