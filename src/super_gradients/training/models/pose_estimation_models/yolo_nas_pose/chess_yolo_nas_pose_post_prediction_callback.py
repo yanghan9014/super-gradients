@@ -29,12 +29,16 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         nms_iou_threshold: float,
         pre_nms_max_predictions: int,
         post_nms_max_predictions: int,
+        piece_kp_threshold: float = 0.0,
+        board_score_top_k: int = 5,
     ):
         """
         :param pose_confidence_threshold: Detection confidence threshold
         :param nms_iou_threshold:         IoU threshold for NMS step (pieces only)
         :param pre_nms_max_predictions:   Max predictions entering NMS
         :param post_nms_max_predictions:  Max predictions after NMS
+        :param piece_kp_threshold:        Min confidence score for piece keypoint 0
+        :param board_score_top_k:         Number of top keypoints to average for board scoring
         """
         if post_nms_max_predictions > pre_nms_max_predictions:
             raise ValueError("post_nms_max_predictions must be less than pre_nms_max_predictions")
@@ -44,6 +48,8 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         self.nms_iou_threshold = nms_iou_threshold
         self.pre_nms_max_predictions = pre_nms_max_predictions
         self.post_nms_max_predictions = post_nms_max_predictions
+        self.piece_kp_threshold = piece_kp_threshold
+        self.board_score_top_k = board_score_top_k
 
     @torch.no_grad()
     def __call__(self, outputs: Tuple[Tuple[Tensor, Tensor, Tensor, Tensor], ...]) -> List[ChessPoseEstimationPredictions]:
@@ -63,34 +69,30 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             # pred_pose_coords  [Anchors, NumJoints, 2] in (x,y) format
             # pred_pose_scores  [Anchors, NumJoints] keypoint confidence [0..1]
 
-            pred_cls_conf, pred_cls_label = torch.max(pred_bboxes_conf, dim=1)
-            conf_mask = pred_cls_conf >= self.pose_confidence_threshold
+            # Piece predictions: max over classes 0 to 11
+            piece_conf, piece_label = torch.max(pred_bboxes_conf[:, :BOARD_CLASS_ID], dim=1)
+            piece_mask = piece_conf >= self.pose_confidence_threshold
+            if self.piece_kp_threshold > 0.0:
+                piece_mask = piece_mask & (pred_pose_scores[:, 0] >= self.piece_kp_threshold)
 
-            pred_cls_conf = pred_cls_conf[conf_mask].float()
-            pred_cls_label = pred_cls_label[conf_mask]
-            pred_bboxes_conf = pred_bboxes_conf[conf_mask].float()
-            pred_bboxes_xyxy = pred_bboxes_xyxy[conf_mask].float()
-            pred_pose_coords = pred_pose_coords[conf_mask].float()   # [N, J, 2]
-            pred_pose_scores = pred_pose_scores[conf_mask].float()   # [N, J]
-
-            # Split into pieces and board
-            piece_mask = pred_cls_label < BOARD_CLASS_ID
-            board_mask = pred_cls_label == BOARD_CLASS_ID
+            # Board predictions: class 12
+            board_conf = pred_bboxes_conf[:, BOARD_CLASS_ID]
+            board_mask = board_conf >= self.pose_confidence_threshold
 
             # ---- Process pieces (classes 0-11): standard NMS ----
             piece_final = self._process_pieces(
-                pred_cls_conf[piece_mask],
-                pred_cls_label[piece_mask],
+                piece_conf[piece_mask],
+                piece_label[piece_mask],
                 pred_bboxes_conf[piece_mask],
                 pred_bboxes_xyxy[piece_mask],
                 pred_pose_coords[piece_mask],
                 pred_pose_scores[piece_mask],
             )
 
-            # ---- Process board (class 12): take the highest-confidence board detection ----
+            # ---- Process board (class 12): take the best board by combined score ----
             board_final = self._process_board(
-                pred_cls_conf[board_mask],
-                pred_cls_label[board_mask],
+                board_conf[board_mask],
+                pred_bboxes_conf.new_full((board_mask.sum(),), BOARD_CLASS_ID, dtype=torch.long),
                 pred_bboxes_conf[board_mask],
                 pred_bboxes_xyxy[board_mask],
                 pred_pose_coords[board_mask],
@@ -172,12 +174,20 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         }
 
     def _process_board(self, cls_conf, cls_label, bboxes_conf, bboxes_xyxy, pose_coords, pose_scores):
-        """Take the highest-confidence board detection. Returns dict or None."""
+        """Take the best board detection using a combined confidence and keypoint score. Returns dict or None."""
         if cls_conf.numel() == 0:
             return None
 
-        # Take the single best board detection
-        best_idx = torch.argmax(cls_conf)
+        # Take the single best board detection weighted by top-K keypoint score quality (geometric mean)
+        k = min(pose_scores.shape[1], self.board_score_top_k)
+        if k > 0:
+            topk_scores = torch.topk(pose_scores, k=k, dim=1).values.clamp(min=1e-8)
+            board_kpt_score = torch.exp(torch.log(topk_scores).mean(dim=1))
+        else:
+            board_kpt_score = pose_scores.new_ones(pose_scores.shape[0])
+            
+        board_score = cls_conf * board_kpt_score
+        best_idx = torch.argmax(board_score)
 
         return {
             "poses": pose_coords[best_idx].unsqueeze(0),         # [1, J, 2]

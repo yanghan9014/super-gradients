@@ -15,6 +15,7 @@ from super_gradients.training.transforms.keypoint_transforms import (
     KeypointsRandomHorizontalFlip,
     KeypointsRandomVerticalFlip,
     KeypointsRandomAffineTransform,
+    KeypointsRandomPerspectiveTransform,
     KeypointsPadIfNeeded,
     KeypointsLongestMaxSize,
 )
@@ -70,6 +71,30 @@ class TestTransforms(unittest.TestCase):
         self.assertTrue((aug_joints[joints_outside_image, 2] == 0).all(), msg=f"{aug_joints[joints_outside_image]}")
         # Ensure that all keypoints with visible status are inside the image
         # (There is no intersection of two sets: keypoints outside the image and keypoints with visible status)
+        self.assertFalse((joints_outside_image & (aug_joints[:, :, 2] == 1)).any())
+
+    def test_keypoints_random_perspective(self):
+        image = np.random.rand(32, 48, 3)
+        mask = np.random.rand(32, 48)
+
+        # Cover all image pixels with keypoints. This would guarantee test coverage of all possible keypoint locations.
+        x = np.arange(image.shape[1])
+        y = np.arange(image.shape[0])
+        xv, yv = np.meshgrid(x, y, indexing="xy")
+
+        joints = np.stack([xv.flatten(), yv.flatten(), np.ones_like(yv.flatten())], axis=-1)  # [N, 3]
+        joints = joints.reshape((-1, 1, 3)).repeat(17, axis=1)  # [N, 17, 3]
+
+        aug = KeypointsRandomPerspectiveTransform(distortion_scale=0.15, prob=1, image_pad_value=0, mask_pad_value=0)
+        aug_image, aug_mask, aug_joints, _, _ = aug(image, mask, joints, None, None)
+
+        joints_outside_image = (
+            (aug_joints[:, :, 0] < 0) | (aug_joints[:, :, 1] < 0) | (aug_joints[:, :, 0] >= aug_image.shape[1]) | (aug_joints[:, :, 1] >= aug_image.shape[0])
+        )
+
+        # Ensure that keypoints outside the image are not visible
+        self.assertTrue((aug_joints[joints_outside_image, 2] == 0).all(), msg=f"{aug_joints[joints_outside_image]}")
+        # Ensure that all keypoints with visible status are inside the image
         self.assertFalse((joints_outside_image & (aug_joints[:, :, 2] == 1)).any())
 
     def test_keypoints_horizontal_flip(self):

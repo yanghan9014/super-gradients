@@ -35,7 +35,8 @@ class ChessHardExampleSampler(WeightedRandomSampler):
             if isinstance(factors, list):
                 weights = np.array(factors)
                 if dataset is not None and len(weights) != len(dataset):
-                    print(f"Warning: weights length ({len(weights)}) does not match dataset length ({len(dataset)}).")
+                    print(f"Warning: weights length ({len(weights)}) does not match dataset length ({len(dataset)}). Falling back to uniform sampling.")
+                    weights = np.ones(len(dataset))
             else:
                 raise ValueError("hard_factors_file should contain a JSON list of weights.")
         

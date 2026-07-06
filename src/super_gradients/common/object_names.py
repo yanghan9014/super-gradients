@@ -130,6 +130,7 @@ class Transforms:
 
     # Keypoints
     KeypointsRandomAffineTransform = "KeypointsRandomAffineTransform"
+    KeypointsRandomPerspectiveTransform = "KeypointsRandomPerspectiveTransform"
     KeypointsImageNormalize = "KeypointsImageNormalize"
     KeypointsImageStandardize = "KeypointsImageStandardize"
     KeypointsImageToTensor = "KeypointsImageToTensor"

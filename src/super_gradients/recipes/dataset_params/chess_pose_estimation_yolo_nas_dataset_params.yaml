@@ -25,12 +25,18 @@ train_dataset_params:
     - KeypointsBrightnessContrast:
         brightness_range: [ 0.4, 1.6 ]
         contrast_range: [ 0.8, 1.2 ]
-        prob: 0.5
+        prob: 1.0
 
     - KeypointsHSV:
-        hgain: 20
+        hgain: 40
         sgain: 20
         vgain: 20
+        prob: 1.0
+
+    - KeypointsRandomPerspectiveTransform:
+        distortion_scale: 0.15
+        image_pad_value: [0, 0, 0]
+        mask_pad_value: 1
         prob: 0.5
     
     - Albumentations:
@@ -40,11 +46,11 @@ train_dataset_params:
                 scale: [0.5, 1.5]
                 keep_ratio: true
                 translate_percent: [-0.1, 0.1]
-                rotate: [-5, 5]
+                rotate: [-90, 90]
                 shear: [-5, 5]
-                cval: [127, 127, 127]
+                cval: [0, 0, 0]
                 cval_mask: 1
-                p: 0.75
+                p: 1.0
             - GaussianBlur:
                 blur_limit: [3, 7]
                 p: 0.2
@@ -55,6 +61,12 @@ train_dataset_params:
                 quality_lower: 50
                 quality_upper: 95
                 p: 0.2
+            - CoarseDropout:
+                max_holes: 3
+                max_height: 96
+                max_width: 96
+                fill_value: 0
+                p: 0.5
           keypoint_params: 
           bbox_params:
             min_area: 0.0
@@ -70,7 +82,7 @@ train_dataset_params:
     - KeypointsPadIfNeeded:
         min_height: ${dataset_params.image_height}
         min_width: ${dataset_params.image_width}
-        image_pad_value: [127, 127, 127]
+        image_pad_value: [0, 0, 0]
         mask_pad_value: 1
         padding_mode: center
 

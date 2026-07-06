@@ -15,6 +15,12 @@ except (ImportError, NameError, ModuleNotFoundError) as import_err:
     imported_albumentations_failure = import_err
 
 if imported_albumentations_failure is None:
+    try:
+        from albumentations import CoarseDropout
+        CoarseDropout.apply_to_bboxes = lambda self, bboxes, **params: bboxes
+        CoarseDropout.apply_to_keypoints = lambda self, keypoints, **params: keypoints
+    except ImportError:
+        pass
     ALBUMENTATIONS_TRANSFORMS = {
         name: cls for name, cls in inspect.getmembers(importlib.import_module("albumentations"), inspect.isclass) if issubclass(cls, BasicTransform)
     }

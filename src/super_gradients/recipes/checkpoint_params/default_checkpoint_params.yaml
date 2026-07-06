@@ -1,5 +1,6 @@
 load_checkpoint: False # whether to load checkpoint
-load_backbone: True # whether to load only backbone part of checkpoint
+load_backbone: False # whether to load only backbone part of checkpoint
+# checkpoint_path: checkpoints/chess_yolo_nas_pose_s_chess/RUN_20260530_012301_609909/average_model.pth # checkpoint path that is located in super_gradients/checkpoints
 checkpoint_path: checkpoints/yolo_nas_pose_s_coco_pose.pth # checkpoint path that is located in super_gradients/checkpoints
 external_checkpoint_path: # checkpoint path that is not located in super_gradients/checkpoints
 source_ckpt_folder_name: # dirname for checkpoint loading

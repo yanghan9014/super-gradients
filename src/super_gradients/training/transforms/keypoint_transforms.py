@@ -9,6 +9,7 @@ from .keypoints import KeypointsMixup
 from .keypoints import KeypointsMosaic
 from .keypoints import KeypointsPadIfNeeded
 from .keypoints import KeypointsRandomAffineTransform
+from .keypoints import KeypointsRandomPerspectiveTransform
 from .keypoints import KeypointsRandomHorizontalFlip
 from .keypoints import KeypointsRandomVerticalFlip
 from .keypoints import KeypointsRescale
@@ -28,6 +29,7 @@ __all__ = [
     "KeypointsMosaic",
     "KeypointsPadIfNeeded",
     "KeypointsRandomAffineTransform",
+    "KeypointsRandomPerspectiveTransform",
     "KeypointsRandomHorizontalFlip",
     "KeypointsRandomVerticalFlip",
     "KeypointsRescale",
