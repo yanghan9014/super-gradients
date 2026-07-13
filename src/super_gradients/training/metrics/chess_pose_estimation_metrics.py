@@ -192,6 +192,7 @@ class ChessPoseEstimationMetrics(Metric):
             self.update_single_image(
                 predicted_poses=predictions[i].poses,
                 predicted_class_scores=predictions[i].scores,
+                predicted_labels=predictions[i].labels,
                 gt_joints=gt_samples[i].joints,
                 gt_bboxes=gt_samples[i].bboxes_xywh,
                 gt_areas=gt_samples[i].areas,
@@ -224,6 +225,7 @@ class ChessPoseEstimationMetrics(Metric):
             self.update_single_image(
                 predicted_poses=predictions[i].poses,
                 predicted_class_scores=getattr(predictions[i], "class_scores", getattr(predictions[i], "scores", None)),
+                predicted_labels=getattr(predictions[i], "labels", None),
                 gt_joints=gt_joints[i],
                 gt_bboxes=gt_bboxes[i] if gt_bboxes is not None else None,
                 gt_areas=gt_areas[i] if gt_areas is not None else None,
@@ -238,12 +240,16 @@ class ChessPoseEstimationMetrics(Metric):
         gt_bboxes: Optional[np.ndarray],
         gt_areas: Optional[np.ndarray],
         gt_labels: Optional[np.ndarray],
+        predicted_labels: Optional[Union[Tensor, np.ndarray]] = None,
     ) -> None:
         """
         Update internal state of metric class with a single image predictions & corresponding groundtruth.
         Method compute OKS for predicted poses, match them to groundtruth poses and update internal state of the metric.
         :param predicted_poses:  Predicted poses of shape (num_instances, num_joints, 3)
         :param predicted_class_scores: Predicted class scores of shape (num_instances, num_classes)
+        :param predicted_labels: Labels explicitly selected by the chess callback. When
+                                 present, the metric uses each selected label's fused score
+                                 instead of recomputing argmax over the whole row.
         :param gt_joints:        Groundtruth joints of shape (num_instances, num_joints, 3)
         :param gt_bboxes:        Groundtruth bounding boxes of shape (num_instances, 4) in XYWH format
         :param gt_areas:         Groundtruth areas of shape (num_instances,)
@@ -269,9 +275,14 @@ class ChessPoseEstimationMetrics(Metric):
 
         if predicted_class_scores.shape[0] == 0:
             predicted_scores = torch.tensor([], dtype=torch.float32, device="cpu")
-            predicted_labels = torch.tensor([], dtype=torch.long, device="cpu")
+            predicted_labels_tensor = torch.tensor([], dtype=torch.long, device="cpu")
+        elif predicted_labels is not None:
+            predicted_labels_tensor = convert_to_tensor(predicted_labels, dtype=torch.long, device="cpu").reshape(-1)
+            if len(predicted_labels_tensor) != predicted_class_scores.shape[0]:
+                raise ValueError("Predicted labels and class scores must have matching length")
+            predicted_scores = predicted_class_scores.gather(1, predicted_labels_tensor[:, None]).squeeze(1)
         else:
-            predicted_scores, predicted_labels = torch.max(predicted_class_scores, dim=1)
+            predicted_scores, predicted_labels_tensor = torch.max(predicted_class_scores, dim=1)
 
         if gt_bboxes is None:
             gt_bboxes = compute_visible_bbox_xywh(torch.tensor(gt_joints[:, :, 0:2]), torch.tensor(gt_joints[:, :, 2]))
@@ -300,14 +311,14 @@ class ChessPoseEstimationMetrics(Metric):
             return
 
         classes_tensors = []
-        if len(predicted_labels):
-            classes_tensors.append(predicted_labels)
+        if len(predicted_labels_tensor):
+            classes_tensors.append(predicted_labels_tensor)
         if len(gt_labels_tensor):
             classes_tensors.append(gt_labels_tensor)
         classes = torch.unique(torch.cat(classes_tensors)) if len(classes_tensors) else torch.tensor([], dtype=torch.long)
 
         for class_id in classes:
-            cls_pred_mask = predicted_labels == class_id
+            cls_pred_mask = predicted_labels_tensor == class_id
             cls_gt_mask = gt_labels_tensor == class_id
 
             cls_targets_mask = torch.logical_and(~gt_is_ignore, cls_gt_mask)

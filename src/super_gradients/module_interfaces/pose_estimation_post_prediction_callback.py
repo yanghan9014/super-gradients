@@ -36,7 +36,9 @@ class ChessPoseEstimationPredictions:
     :param pose_scores:  Array of shape [N, Num Joints] with per-keypoint confidence [0..1].
     :param scores:       Array of shape [N, Num Classes] with class scores for each detection.
     :param labels:       Array of shape [N] with class labels (0-11: pieces, 12: board).
-    :param bboxes_xyxy:  Array of shape [N, 4] with bounding boxes in XYXY format.
+    :param bboxes_xyxy:  Optional bounding boxes. It is None for the box-free chess model.
+    :param class_probabilities: Optional conditional softmax class probabilities [N, Num Classes].
+    :param quality_scores: Optional scalar detection-quality scores [N, 1].
     """
 
     poses: Union[Tensor, np.ndarray]
@@ -44,6 +46,8 @@ class ChessPoseEstimationPredictions:
     scores: Union[Tensor, np.ndarray]
     labels: Union[Tensor, np.ndarray]
     bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
+    class_probabilities: Optional[Union[Tensor, np.ndarray]] = None
+    quality_scores: Optional[Union[Tensor, np.ndarray]] = None
 
 
 class AbstractPoseEstimationPostPredictionCallback(abc.ABC):

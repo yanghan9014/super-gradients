@@ -43,52 +43,47 @@ class YoloNASPoseDecodingModule(AbstractPoseEstimationDecodingModule):
         :return:
         """
         if torch.jit.is_tracing():
-            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = inputs
+            fused_scores, _, _, _, _ = inputs
         else:
-            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = inputs[0]
+            fused_scores, _, _, _, _ = inputs[0]
 
-        return pred_bboxes_xyxy.size(1)
+        return fused_scores.size(1)
 
     def get_num_pre_nms_predictions(self) -> int:
         return self.num_pre_nms_predictions
 
+    def get_output_names(self) -> List[str]:
+        return ["fused_scores", "class_probabilities", "quality_scores", "pose_coordinates", "keypoint_scores"]
+
     def forward(self, inputs: Tuple[Tuple[Tensor, Tensor], Tuple[Tensor, ...]]):
         """
-        Decode YoloNASPose model outputs into bounding boxes, confidence scores and pose coordinates and scores
+        Top-k filter the box-free chess outputs without applying NMS.
 
         :param inputs: YoloNASPose model outputs
-        :return: Tuple of (pred_bboxes, pred_scores, pred_joints)
-        - pred_bboxes: [Batch, num_pre_nms_predictions, 4] Bounding of associated with pose in XYXY format
-        - pred_scores: [Batch, num_pre_nms_predictions, 1] Confidence scores [0..1] for entire pose
-        - pred_joints: [Batch, num_pre_nms_predictions, Num Joints, 3] Joints in (x,y,confidence) format
+        :return: fused scores, class probabilities, quality scores, pose coordinates,
+                 and keypoint scores for the highest-ranked anchors.
         """
         if torch.jit.is_tracing():
-            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = inputs
+            fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs
         else:
-            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = inputs[0]
+            fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs[0]
 
-        nms_top_k = self.num_pre_nms_predictions
-        batch_size, num_anchors, _ = pred_bboxes_conf.size()
+        top_k = min(self.num_pre_nms_predictions, fused_scores.shape[1])
+        ranking_scores = fused_scores.max(dim=-1).values
+        indices = torch.topk(ranking_scores, dim=1, k=top_k, largest=True, sorted=True).indices
 
-        topk_candidates = torch.topk(pred_bboxes_conf, dim=1, k=nms_top_k, largest=True, sorted=True)
+        class_index = indices.unsqueeze(-1).expand(-1, -1, fused_scores.shape[-1])
+        quality_index = indices.unsqueeze(-1)
+        pose_index = indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, pose_coords.shape[2], 2)
+        keypoint_index = indices.unsqueeze(-1).expand(-1, -1, keypoint_scores.shape[2])
 
-        offsets = num_anchors * torch.arange(batch_size, device=pred_bboxes_conf.device)
-        indices_with_offset = topk_candidates.indices + offsets.reshape(batch_size, 1, 1)
-        flat_indices = torch.flatten(indices_with_offset)
-
-        pred_poses_and_scores = torch.cat([pred_pose_coords, pred_pose_scores.unsqueeze(3)], dim=3)
-
-        output_pred_bboxes = pred_bboxes_xyxy.reshape(-1, pred_bboxes_xyxy.size(2))[flat_indices, :].reshape(
-            pred_bboxes_xyxy.size(0), nms_top_k, pred_bboxes_xyxy.size(2)
+        return (
+            fused_scores.gather(1, class_index),
+            class_probabilities.gather(1, class_index),
+            quality_scores.gather(1, quality_index),
+            pose_coords.gather(1, pose_index),
+            keypoint_scores.gather(1, keypoint_index),
         )
-        output_pred_scores = pred_bboxes_conf.reshape(-1, pred_bboxes_conf.size(2))[flat_indices, :].reshape(
-            pred_bboxes_conf.size(0), nms_top_k, pred_bboxes_conf.size(2)
-        )
-        output_pred_joints = pred_poses_and_scores.reshape(-1, pred_poses_and_scores.size(2), 3)[flat_indices, :, :].reshape(
-            pred_poses_and_scores.size(0), nms_top_k, pred_poses_and_scores.size(2), pred_poses_and_scores.size(3)
-        )
-
-        return output_pred_bboxes, output_pred_scores, output_pred_joints
 
 
 class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsInputShapeCheck):

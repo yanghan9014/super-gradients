@@ -18,9 +18,13 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     ChessYoloNASPoseDFLHead is the head used in the Chess YoloNASPose model.
 
     It implements:
-      - multi-class object detection (num_classes detection classes)
+      - conditional multi-class classification (num_classes chess classes)
+      - scalar foreground/localization quality prediction
       - keypoint regression with num_joints keypoints per detection (x, y, confidence)
         on a single scale feature map.
+
+    The historical class name is retained for configuration compatibility. This
+    chess-specific head no longer predicts DFL bounding-box distributions.
     """
 
     def __init__(
@@ -45,7 +49,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         Initialize the ChessYoloNASPoseDFLHead.
 
         :param in_channels: Input channels.
-        :param bbox_inter_channels: Intermediate number of channels for box detection & regression.
+        :param bbox_inter_channels: Intermediate number of channels for class and quality prediction.
         :param pose_inter_channels: Intermediate number of channels for pose regression.
         :param pose_regression_blocks: Number of conv blocks in the pose branch.
         :param shared_stem: Whether to share the stem between the pose and bbox heads.
@@ -55,7 +59,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         :param first_conv_group_size: Group size for depthwise-ish conv; see original YOLO-NAS.
         :param num_classes: Number of detection classes.
         :param stride: Output stride for this head.
-        :param reg_max: Number of bins in the regression head (DFL).
+        :param reg_max: Unused legacy DFL parameter, retained for configuration compatibility.
         :param num_joints: Number of keypoints per detection (default 9).
         :param cls_dropout_rate: Dropout rate for the classification head.
         :param reg_dropout_rate: Dropout rate for the regression head.
@@ -103,7 +107,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             self.pose_stem = ConvBNReLU(in_channels, pose_inter_channels, kernel_size=1, stride=1, padding=0, bias=False)
             self.bbox_stem = ConvBNReLU(in_channels, bbox_inter_channels, kernel_size=1, stride=1, padding=0, bias=False)
 
-        # ----- bbox branch -----
+        # ----- class / detection-quality branch -----
         first_cls_conv = (
             [ConvBNReLU(bbox_inter_channels, bbox_inter_channels, kernel_size=3, stride=1, padding=1, groups=groups, bias=False)]
             if groups
@@ -114,21 +118,12 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             ConvBNReLU(bbox_inter_channels, bbox_inter_channels, kernel_size=3, stride=1, padding=1, bias=False),
         )
 
-        first_reg_conv = (
-            [ConvBNReLU(bbox_inter_channels, bbox_inter_channels, kernel_size=3, stride=1, padding=1, groups=groups, bias=False)]
-            if groups
-            else []
-        )
-        self.reg_convs = nn.Sequential(
-            *first_reg_conv,
-            ConvBNReLU(bbox_inter_channels, bbox_inter_channels, kernel_size=3, stride=1, padding=1, bias=False),
-        )
-
-        # DFL regression for bounding boxes
-        self.reg_pred = nn.Conv2d(bbox_inter_channels, 4 * (reg_max + 1), 1, 1, 0)
-
-        # Multi-class detection: [B, num_classes, H, W]
+        # Conditional class logits: [B, num_classes, H, W]. These are decoded
+        # with softmax and supervised only on matched positive anchors.
         self.cls_pred = nn.Conv2d(bbox_inter_channels, self.num_classes, 1, 1, 0)
+
+        # Object-agnostic detection-quality logit: [B, 1, H, W].
+        self.quality_pred = nn.Conv2d(bbox_inter_channels, 1, 1, 1, 0)
 
         # ----- pose branch -----
         if pose_block_use_repvgg:
@@ -162,9 +157,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         :param x: Input feature map of shape [B, Cin, H, W]
-        :return: Tuple of [reg_output, cls_output, pose_regression, pose_logits]
-            - reg_output:      [B, 4 * (reg_max + 1), H, W]
+        :return: Tuple of [cls_output, quality_output, pose_regression, pose_logits]
             - cls_output:      [B, num_classes, H, W]
+            - quality_output:  [B, 1, H, W]
             - pose_regression: [B, num_joints, 2, H, W]
             - pose_logits:     [B, num_joints, H, W]
         """
@@ -177,10 +172,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         cls_feat = self.cls_dropout_rate(cls_feat)
         cls_output = self.cls_pred(cls_feat)
 
-        # box regression (DFL)
-        reg_feat = self.reg_convs(bbox_features)
-        reg_feat = self.reg_dropout_rate(reg_feat)
-        reg_output = self.reg_pred(reg_feat)
+        quality_output = self.quality_pred(cls_feat)
 
         # pose regression
         pose_feat = self.pose_convs(pose_features)
@@ -196,8 +188,11 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_logits = pose_output[:, :, 2, :, :]        # [B, num_joints, H, W]
         pose_regression = pose_output[:, :, 0:2, :, :]  # [B, num_joints, 2, H, W]
 
-        return reg_output, cls_output, pose_regression, pose_logits
+        return cls_output, quality_output, pose_regression, pose_logits
 
     def _initialize_biases(self):
         prior_bias = -math.log((1 - self.prior_prob) / self.prior_prob)
-        torch.nn.init.constant_(self.cls_pred.bias, prior_bias)
+        # Equal class biases are neutral under softmax. The low quality prior is
+        # useful because most dense anchors are background.
+        torch.nn.init.zeros_(self.cls_pred.bias)
+        torch.nn.init.constant_(self.quality_pred.bias, prior_bias)

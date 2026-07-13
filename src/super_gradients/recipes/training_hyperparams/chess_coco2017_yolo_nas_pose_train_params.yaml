@@ -24,16 +24,17 @@ criterion_params:
     piece_oks_sigma: ${dataset_params.piece_oks_sigma}
     board_class_id: 12
     num_classes: ${dataset_params.num_classes}
-    classification_loss_weight: 5.0
-    classification_loss_type: focal
-    regression_iou_loss_type: ciou
-    iou_loss_weight: 7.5
-    dfl_loss_weight: 0.01
+    classification_loss_weight: 1.0
+    quality_loss_weight: 1.0
     pose_cls_loss_weight: 1.0
     pose_reg_loss_weight: 50.0
-    pose_classification_loss_type: focal
-    rescale_pose_loss_with_assigned_score: True
-    assigner_multiply_by_pose_oks: True
+    piece_quality_sigma: ${dataset_params.piece_quality_sigma}
+    board_quality_sigma: ${dataset_params.board_quality_sigma}
+    piece_candidate_radius: ${dataset_params.piece_candidate_radius}
+    quality_warmup_steps: 1000
+    bbox_assigner_topk: 13
+    bbox_assigned_alpha: 1.0
+    bbox_assigned_beta: 6.0
     # board_localization_loss_multiplier: 5.0
 
 optimizer: AdamW
