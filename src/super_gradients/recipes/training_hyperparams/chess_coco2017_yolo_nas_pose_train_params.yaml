@@ -57,7 +57,6 @@ valid_metrics_list:
       post_prediction_callback:
         _target_: super_gradients.training.models.pose_estimation_models.yolo_nas_pose.ChessYoloNASPosePostPredictionCallback
         pose_confidence_threshold: 0.35
-        nms_iou_threshold: 0.7
         pre_nms_max_predictions: 300
         post_nms_max_predictions: 50
 
@@ -78,7 +77,6 @@ phase_callbacks:
       post_prediction_callback:
         _target_: super_gradients.training.models.pose_estimation_models.yolo_nas_pose.ChessYoloNASPosePostPredictionCallback
         pose_confidence_threshold: 0.35
-        nms_iou_threshold: 0.7
         pre_nms_max_predictions: 300
         post_nms_max_predictions: 50
 

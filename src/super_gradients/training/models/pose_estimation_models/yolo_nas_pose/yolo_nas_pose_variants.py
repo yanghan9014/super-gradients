@@ -57,11 +57,11 @@ class YoloNASPoseDecodingModule(AbstractPoseEstimationDecodingModule):
 
     def forward(self, inputs: Tuple[Tuple[Tensor, Tensor], Tuple[Tensor, ...]]):
         """
-        Top-k filter the box-free chess outputs without applying NMS.
+        Top-k filter the box-free chess outputs by scalar quality without applying NMS.
 
         :param inputs: YoloNASPose model outputs
         :return: fused scores, class probabilities, quality scores, pose coordinates,
-                 and keypoint scores for the highest-ranked anchors.
+                 and keypoint scores for the highest-quality anchors.
         """
         if torch.jit.is_tracing():
             fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs
@@ -69,7 +69,7 @@ class YoloNASPoseDecodingModule(AbstractPoseEstimationDecodingModule):
             fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs[0]
 
         top_k = min(self.num_pre_nms_predictions, fused_scores.shape[1])
-        ranking_scores = fused_scores.max(dim=-1).values
+        ranking_scores = quality_scores.squeeze(-1)
         indices = torch.topk(ranking_scores, dim=1, k=top_k, largest=True, sorted=True).indices
 
         class_index = indices.unsqueeze(-1).expand(-1, -1, fused_scores.shape[-1])
@@ -260,7 +260,6 @@ class YoloNASPose(CustomizableDetector, ExportablePoseEstimationModel, SupportsI
     ) -> ChessYoloNASPosePostPredictionCallback:
         return ChessYoloNASPosePostPredictionCallback(
             pose_confidence_threshold=conf,
-            nms_iou_threshold=iou,
             pre_nms_max_predictions=pre_nms_max_predictions,
             post_nms_max_predictions=post_nms_max_predictions,
         )

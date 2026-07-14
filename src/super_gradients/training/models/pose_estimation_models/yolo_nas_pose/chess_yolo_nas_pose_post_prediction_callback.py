@@ -16,31 +16,28 @@ BOARD_KEYPOINT_NAMES = ["a1", "a8", "h1", "h8", "center", "a45", "h45", "1de", "
 class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictionCallback):
     """Threshold box-free predictions and retain task-specific candidates.
 
-    Pieces are only top-k filtered here. Duplicate pieces are resolved after
-    homography projection by keeping the highest fused score per board square.
-    The single board candidate is selected with fused detection score and its
-    strongest keypoint-visibility scores.
+    Piece classes are selected from the conditional class distribution, and
+    pieces are quality-thresholded and top-k filtered without using their class
+    probability as a gate. Duplicate pieces are resolved after homography
+    projection by keeping the highest fused score per board square.
+    Boards are not quality-thresholded here.
+    The single board candidate is selected by its fused detection score.
     """
 
     def __init__(
         self,
         pose_confidence_threshold: float,
-        nms_iou_threshold: float = 0.7,
         pre_nms_max_predictions: int = 300,
         post_nms_max_predictions: int = 50,
-        piece_kp_threshold: float = 0.0,
-        board_score_top_k: int = 5,
     ):
         if post_nms_max_predictions > pre_nms_max_predictions:
             raise ValueError("post_nms_max_predictions must be less than pre_nms_max_predictions")
         super().__init__()
-        self.pose_confidence_threshold = pose_confidence_threshold
-        # Kept as compatibility-only configuration; no box NMS is performed.
-        self.nms_iou_threshold = nms_iou_threshold
+        # Keep the public SuperGradients argument name for compatibility, but
+        # interpret it as the minimum scalar quality d for piece anchors only.
+        self.piece_quality_threshold = pose_confidence_threshold
         self.pre_nms_max_predictions = pre_nms_max_predictions
         self.post_nms_max_predictions = post_nms_max_predictions
-        self.piece_kp_threshold = piece_kp_threshold
-        self.board_score_top_k = board_score_top_k
 
     @torch.no_grad()
     def __call__(self, outputs: Tuple[Tuple[Tensor, ...], ...]) -> List[ChessPoseEstimationPredictions]:
@@ -50,14 +47,13 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         for pred_values in zip(*predictions):
             fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = pred_values
 
-            piece_confidence, piece_labels = fused_scores[:, :BOARD_CLASS_ID].max(dim=1)
-            piece_mask = piece_confidence >= self.pose_confidence_threshold
-            if self.piece_kp_threshold > 0.0:
-                piece_mask &= keypoint_scores[:, 0] >= self.piece_kp_threshold
+            quality = quality_scores.squeeze(-1)
+            predicted_labels = class_probabilities.argmax(dim=1)
+            piece_mask = (predicted_labels < BOARD_CLASS_ID) & (quality >= self.piece_quality_threshold)
 
             piece_result = self._process_pieces(
-                confidence=piece_confidence[piece_mask],
-                labels=piece_labels[piece_mask],
+                confidence=quality[piece_mask],
+                labels=predicted_labels[piece_mask],
                 fused_scores=fused_scores[piece_mask],
                 class_probabilities=class_probabilities[piece_mask],
                 quality_scores=quality_scores[piece_mask],
@@ -65,10 +61,10 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 keypoint_scores=keypoint_scores[piece_mask],
             )
 
-            board_confidence = fused_scores[:, BOARD_CLASS_ID]
-            board_mask = board_confidence >= self.pose_confidence_threshold
+            board_mask = predicted_labels == BOARD_CLASS_ID
+            board_confidence = fused_scores[board_mask, BOARD_CLASS_ID]
             board_result = self._process_board(
-                confidence=board_confidence[board_mask],
+                confidence=board_confidence,
                 fused_scores=fused_scores[board_mask],
                 class_probabilities=class_probabilities[board_mask],
                 quality_scores=quality_scores[board_mask],
@@ -149,14 +145,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         if confidence.numel() == 0:
             return None
 
-        k = min(keypoint_scores.shape[1], self.board_score_top_k)
-        if k > 0:
-            strongest = torch.topk(keypoint_scores, k=k, dim=1).values.clamp_min(1e-8)
-            usable_keypoint_score = strongest.log().mean(dim=1).exp()
-        else:
-            usable_keypoint_score = confidence.new_ones(confidence.shape)
-
-        best = torch.argmax(confidence * usable_keypoint_score)
+        best = torch.argmax(confidence)
         return {
             "poses": pose_coords[best].unsqueeze(0),
             "keypoint_scores": keypoint_scores[best].unsqueeze(0),
