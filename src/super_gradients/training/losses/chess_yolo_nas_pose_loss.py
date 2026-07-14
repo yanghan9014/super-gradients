@@ -56,10 +56,6 @@ class YoloNASPoseAssignmentResult:
     positive_mask: Tensor  # [B, A]
 
 
-# Compatibility alias for code that imported the historical name.
-YoloNASPoseBoxesAssignmentResult = YoloNASPoseAssignmentResult
-
-
 def _shoelace_area(points: Tensor) -> Tensor:
     x = points[..., 0]
     y = points[..., 1]
@@ -213,10 +209,10 @@ def estimate_board_geometry(
 
 
 def _points_inside_convex_quad(points: Tensor, quadrilateral: Tensor, eps: float) -> Tensor:
-    edges = torch.roll(quadrilateral, shifts=-1, dims=0) - quadrilateral
-    relative = points[:, None, :] - quadrilateral[None, :, :]
-    cross = edges[None, :, 0] * relative[:, :, 1] - edges[None, :, 1] * relative[:, :, 0]
-    return (cross >= -eps).all(dim=-1) | (cross <= eps).all(dim=-1)
+    edges = torch.roll(quadrilateral, shifts=-1, dims=0) - quadrilateral  # [4, 2]
+    relative = points[:, None, :] - quadrilateral[None, :, :]  # [A, 4, 2]
+    cross = edges[None, :, 0] * relative[:, :, 1] - edges[None, :, 1] * relative[:, :, 0]  # [A, 4]
+    return (cross >= -eps).all(dim=-1) | (cross <= eps).all(dim=-1)  # [A]
 
 
 def batch_localization_quality(
@@ -237,35 +233,38 @@ def batch_localization_quality(
     squared_distance = ((pred_xy - gt_xy) ** 2).sum(dim=-1)  # [B, N, A, J]
     visible = gt_poses[..., 2].gt(0).float().unsqueeze(2)  # [B, N, 1, J]
 
-    area = board_areas.float().clamp_min(eps)[:, None, None]
-    piece_error = squared_distance[..., 0] / area
-    board_error = (squared_distance * visible).sum(dim=-1) / (area * visible.sum(dim=-1).clamp_min(1.0))
+    area = board_areas.float().clamp_min(eps)[:, None, None]  # [B, 1, 1]
+    piece_error = squared_distance[..., 0] / area  # [B, N, A]
+    board_error = (squared_distance * visible).sum(dim=-1) / (area * visible.sum(dim=-1).clamp_min(1.0))  # [B, N, A]
 
-    labels = gt_labels.squeeze(-1).long()
-    is_board = labels.eq(board_class_id)
-    normalized_error = torch.where(is_board.unsqueeze(-1), board_error, piece_error)
+    labels = gt_labels.squeeze(-1).long()  # [B, N]
+    is_board = labels.eq(board_class_id)  # [B, N]
+    normalized_error = torch.where(is_board.unsqueeze(-1), board_error, piece_error)  # [B, N, A]
     sigma = torch.where(
         is_board,
         normalized_error.new_full(is_board.shape, board_sigma_q),
         normalized_error.new_full(is_board.shape, piece_sigma_q),
-    )
-    quality = torch.exp(-normalized_error / (2.0 * sigma.unsqueeze(-1).square().clamp_min(eps)))
+    )  # [B, N]
+    quality = torch.exp(-normalized_error / (2.0 * sigma.unsqueeze(-1).square().clamp_min(eps)))  # [B, N, A]
 
-    piece_visible = gt_poses[..., 0, 2].gt(0)
-    board_visible = gt_poses[..., 2].gt(0).any(dim=-1)
-    valid_pose = torch.where(is_board, board_visible, piece_visible)
-    valid = pad_gt_mask.squeeze(-1).bool() & valid_pose & board_areas.gt(eps).unsqueeze(-1)
-    return quality * valid.unsqueeze(-1)
+    piece_visible = gt_poses[..., 0, 2].gt(0)  # [B, N]
+    board_visible = gt_poses[..., 2].gt(0).any(dim=-1)  # [B, N]
+    valid_pose = torch.where(is_board, board_visible, piece_visible)  # [B, N]
+    valid = pad_gt_mask.squeeze(-1).bool() & valid_pose & board_areas.gt(eps).unsqueeze(-1)  # [B, N]
+    return quality * valid.unsqueeze(-1)  # [B, N, A]
 
 
 class YoloNASPoseTaskAlignedAssigner(nn.Module):
-    """Assign anchors using class compatibility and image-space pose quality."""
+    """Assign anchors using class compatibility and image-space pose quality.
+
+    Shape notation used below: B=batch, N=padded GT instances, A=anchors,
+    C=classes, J=keypoints, and M=the safety-cap size.
+    """
 
     def __init__(
         self,
-        topk: int = 13,
-        alpha: float = 1.0,
-        beta: float = 6.0,
+        alignment_support_delta: float = 0.5,
+        max_positives_per_gt: int = 32,
         piece_candidate_radius: float = 0.10,
         piece_sigma_q: float = 0.04,
         board_sigma_q: float = 0.025,
@@ -273,9 +272,8 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         eps: float = 1e-9,
     ):
         super().__init__()
-        self.topk = topk
-        self.alpha = alpha
-        self.beta = beta
+        self.alignment_support_delta = alignment_support_delta
+        self.max_positives_per_gt = max_positives_per_gt
         self.piece_candidate_radius = piece_candidate_radius
         self.piece_sigma_q = piece_sigma_q
         self.board_sigma_q = board_sigma_q
@@ -295,38 +293,44 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         bg_index: int,
         class_alignment_progress: float = 1.0,
     ) -> YoloNASPoseAssignmentResult:
-        batch_size, num_anchors, num_classes = pred_class_probabilities.shape
-        num_gt = gt_labels.shape[1]
-        num_keypoints = pred_pose_coords.shape[2]
+        """Build one GT assignment for each anchor without box or IoU supervision.
+
+        Inputs are ``pred_class_probabilities`` [B,A,C], ``pred_pose_coords``
+        [B,A,J,2], ``anchor_points`` [A,2], ``gt_labels`` [B,N,1],
+        ``gt_poses`` [B,N,J,3], and ``pad_gt_mask`` [B,N,1].
+        """
+        batch_size, num_anchors, num_classes = pred_class_probabilities.shape  # [B, A, C]
+        num_gt = gt_labels.shape[1]  # N
+        num_keypoints = pred_pose_coords.shape[2]  # J
 
         if num_gt == 0:
             return YoloNASPoseAssignmentResult(
-                assigned_labels=torch.full((batch_size, num_anchors), bg_index, dtype=torch.long, device=gt_labels.device),
-                assigned_poses=pred_pose_coords.new_zeros((batch_size, num_anchors, num_keypoints, 3)),
-                assigned_gt_index=torch.zeros((batch_size, num_anchors), dtype=torch.long, device=gt_labels.device),
-                assigned_quality=pred_pose_coords.new_zeros((batch_size, num_anchors)),
-                positive_mask=torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=gt_labels.device),
+                assigned_labels=torch.full((batch_size, num_anchors), bg_index, dtype=torch.long, device=gt_labels.device),  # [B, A]
+                assigned_poses=pred_pose_coords.new_zeros((batch_size, num_anchors, num_keypoints, 3)),  # [B, A, J, 3]
+                assigned_gt_index=torch.zeros((batch_size, num_anchors), dtype=torch.long, device=gt_labels.device),  # [B, A]
+                assigned_quality=pred_pose_coords.new_zeros((batch_size, num_anchors)),  # [B, A]
+                positive_mask=torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=gt_labels.device),  # [B, A]
             )
 
-        labels = gt_labels.squeeze(-1).long()
-        valid_gt = pad_gt_mask.squeeze(-1).bool()
-        is_board = labels.eq(self.board_class_id)
-        board_scale = board_geometry.areas.clamp_min(self.eps).sqrt()
+        labels = gt_labels.squeeze(-1).long()  # [B, N]
+        valid_gt = pad_gt_mask.squeeze(-1).bool()  # [B, N]
+        is_board = labels.eq(self.board_class_id)  # [B, N]
+        board_scale = board_geometry.areas.clamp_min(self.eps).sqrt()  # [B]
 
         # Piece candidates are local to the annotated center.
-        piece_points = gt_poses[..., 0, :2].float()
-        distances = torch.linalg.vector_norm(piece_points.unsqueeze(2) - anchor_points.float()[None, None, :, :], dim=-1)
-        piece_candidates = distances <= (self.piece_candidate_radius * board_scale)[:, None, None]
-        piece_candidates &= gt_poses[..., 0, 2].gt(0).unsqueeze(-1)
+        piece_points = gt_poses[..., 0, :2].float()  # [B, N, 2]
+        distances = torch.linalg.vector_norm(piece_points.unsqueeze(2) - anchor_points.float()[None, None, :, :], dim=-1)  # [B, N, A]
+        piece_candidates = distances <= (self.piece_candidate_radius * board_scale)[:, None, None]  # [B, N, A]
+        piece_candidates &= gt_poses[..., 0, 2].gt(0).unsqueeze(-1)  # [B, N, A]
 
         # Board candidates use the reconstructed full quadrilateral, or the
         # visible-point AABB when the homography fit was unavailable.
-        board_region = torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=anchor_points.device)
+        board_region = torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=anchor_points.device)  # [B, A]
         for batch_index in range(batch_size):
             if board_geometry.homography_valid[batch_index]:
                 board_region[batch_index] = _points_inside_convex_quad(
                     anchor_points.float(), board_geometry.quadrilaterals[batch_index], self.eps
-                )
+                )  # [A]
             elif board_geometry.area_valid[batch_index]:
                 x1, y1, x2, y2 = board_geometry.aabbs[batch_index]
                 board_region[batch_index] = (
@@ -334,10 +338,10 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
                     & (anchor_points[:, 0] <= x2)
                     & (anchor_points[:, 1] >= y1)
                     & (anchor_points[:, 1] <= y2)
-                )
+                )  # [A]
 
-        candidate_mask = torch.where(is_board.unsqueeze(-1), board_region.unsqueeze(1), piece_candidates)
-        candidate_mask &= valid_gt.unsqueeze(-1) & board_geometry.area_valid[:, None, None]
+        candidate_mask = torch.where(is_board.unsqueeze(-1), board_region.unsqueeze(1), piece_candidates)  # [B, N, A]
+        candidate_mask &= valid_gt.unsqueeze(-1) & board_geometry.area_valid[:, None, None]  # [B, N, A]
 
         quality = batch_localization_quality(
             gt_labels=gt_labels,
@@ -349,39 +353,44 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             board_sigma_q=self.board_sigma_q,
             board_class_id=self.board_class_id,
             eps=self.eps,
-        )
+        )  # [B, N, A]
 
-        safe_labels = labels.clamp(min=0, max=num_classes - 1)
-        class_probabilities = pred_class_probabilities.detach().float().unsqueeze(1).expand(-1, num_gt, -1, -1)
+        safe_labels = labels.clamp(min=0, max=num_classes - 1)  # [B, N]
+        class_probabilities = pred_class_probabilities.detach().float().unsqueeze(1).expand(-1, num_gt, -1, -1)  # [B, N, A, C]
         class_probabilities = class_probabilities.gather(
             dim=-1,
-            index=safe_labels[:, :, None, None].expand(-1, -1, num_anchors, 1),
-        ).squeeze(-1)
+            index=safe_labels[:, :, None, None].expand(-1, -1, num_anchors, 1),  # [B, N, A, 1]
+        ).squeeze(-1)  # [B, N, A]
 
         # Ranking is done in log space. During warmup the class exponent starts
         # at zero, so assignment is geometry-only; d is deliberately never used.
-        class_exponent = self.alpha * float(class_alignment_progress)
-        log_alignment = class_exponent * class_probabilities.clamp_min(self.eps).log()
-        log_alignment += self.beta * quality.clamp_min(self.eps).log()
-        log_alignment = log_alignment.masked_fill(~candidate_mask, -torch.inf)
+        class_exponent = float(class_alignment_progress)  # scalar tau in [0, 1]
+        log_alignment = class_exponent * class_probabilities.clamp_min(self.eps).log()  # [B, N, A]
+        log_alignment += quality.clamp_min(self.eps).log()  # [B, N, A]
+        log_alignment = log_alignment.masked_fill(~candidate_mask, -torch.inf)  # [B, N, A]
 
-        k = min(self.topk, num_anchors)
-        top_values, top_indices = torch.topk(log_alignment, k=k, dim=-1)
-        selected = torch.zeros_like(candidate_mask)
-        selected.scatter_(dim=-1, index=top_indices, src=torch.isfinite(top_values))
+        # Retain the likelihood support within delta of each GT's best anchor.
+        # top-k is only a safety cap; it does not define the normal support size.
+        best_log_alignment = log_alignment.max(dim=-1, keepdim=True).values  # [B, N, 1]
+        support_threshold = best_log_alignment - self.alignment_support_delta  # [B, N, 1]
+        safety_cap = min(self.max_positives_per_gt, num_anchors)  # M
+        top_values, top_indices = torch.topk(log_alignment, k=safety_cap, dim=-1)  # each [B, N, M]
+        within_support = torch.isfinite(top_values) & (top_values >= support_threshold)  # [B, N, M]
+        selected = torch.zeros_like(candidate_mask)  # [B, N, A]
+        selected.scatter_(dim=-1, index=top_indices, src=within_support)  # [B, N, A]
 
-        positive_mask = selected.any(dim=1)
+        positive_mask = selected.any(dim=1)  # [B, A]
         # A shared anchor goes to the GT whose current pose is the best match.
-        conflict_quality = quality.masked_fill(~selected, -1.0)
-        assigned_gt_index = conflict_quality.argmax(dim=1)
+        conflict_quality = quality.masked_fill(~selected, -1.0)  # [B, N, A]
+        assigned_gt_index = conflict_quality.argmax(dim=1)  # [B, A]
 
-        assigned_labels = labels.gather(1, assigned_gt_index)
-        assigned_labels = torch.where(positive_mask, assigned_labels, torch.full_like(assigned_labels, bg_index))
-        assigned_quality = quality.gather(1, assigned_gt_index.unsqueeze(1)).squeeze(1)
-        assigned_quality = torch.where(positive_mask, assigned_quality, torch.zeros_like(assigned_quality))
+        assigned_labels = labels.gather(1, assigned_gt_index)  # [B, A]
+        assigned_labels = torch.where(positive_mask, assigned_labels, torch.full_like(assigned_labels, bg_index))  # [B, A]
+        assigned_quality = quality.gather(1, assigned_gt_index.unsqueeze(1)).squeeze(1)  # [B, A]
+        assigned_quality = torch.where(positive_mask, assigned_quality, torch.zeros_like(assigned_quality))  # [B, A]
 
-        pose_index = assigned_gt_index[:, :, None, None].expand(-1, -1, num_keypoints, 3)
-        assigned_poses = gt_poses.gather(1, pose_index)
+        pose_index = assigned_gt_index[:, :, None, None].expand(-1, -1, num_keypoints, 3)  # [B, A, J, 3]
+        assigned_poses = gt_poses.gather(1, pose_index)  # [B, A, J, 3]
 
         return YoloNASPoseAssignmentResult(
             assigned_labels=assigned_labels,
@@ -398,9 +407,8 @@ class ChessYoloNASPoseLoss(nn.Module):
 
     def __init__(
         self,
-        oks_sigmas: Optional[Union[List[float], np.ndarray, Tensor]] = None,
-        board_oks_sigmas: Optional[Union[List[float], np.ndarray, Tensor]] = None,
-        piece_oks_sigma: Optional[Union[List[float], np.ndarray, Tensor]] = None,
+        board_oks_sigmas: Union[List[float], np.ndarray, Tensor],
+        piece_oks_sigma: float,
         num_classes: int = 13,
         board_class_id: int = 12,
         classification_loss_weight: float = 1.0,
@@ -408,37 +416,36 @@ class ChessYoloNASPoseLoss(nn.Module):
         pose_cls_loss_weight: float = 1.0,
         pose_reg_loss_weight: float = 1.0,
         board_localization_loss_multiplier: float = 1.0,
-        bbox_assigner_topk: int = 13,
-        bbox_assigned_alpha: float = 1.0,
-        bbox_assigned_beta: float = 6.0,
+        alignment_support_delta: float = 0.5,
+        max_positives_per_gt: int = 32,
         piece_candidate_radius: float = 0.10,
         piece_quality_sigma: float = 0.04,
         board_quality_sigma: float = 0.025,
-        quality_warmup_steps: int = 1000,
+        alignment_warmup_iterations: int = 1000,
         min_board_area: float = 16.0,
         homography_max_condition_number: float = 1e8,
-        # Deprecated bbox/quality-weighting settings are accepted so old recipe
-        # overrides fail softly while the revised objective remains enforced.
-        classification_loss_type: Optional[str] = None,
-        regression_iou_loss_type: Optional[str] = None,
-        iou_loss_weight: float = 0.0,
-        dfl_loss_weight: float = 0.0,
-        pose_classification_loss_type: Optional[str] = None,
-        assigner_multiply_by_pose_oks: bool = False,
-        rescale_pose_loss_with_assigned_score: bool = False,
-        average_losses_in_ddp: bool = False,
     ):
         super().__init__()
-        if board_oks_sigmas is None:
-            board_oks_sigmas = oks_sigmas
-        if board_oks_sigmas is None:
-            raise ValueError("board_oks_sigmas or oks_sigmas must be provided")
-        if piece_oks_sigma is None:
-            piece_oks_sigma = [0.5]
+        board_oks_sigmas = torch.as_tensor(board_oks_sigmas, dtype=torch.float32)
+        if board_oks_sigmas.ndim != 1 or board_oks_sigmas.numel() == 0 or not board_oks_sigmas.gt(0).all():
+            raise ValueError("board_oks_sigmas must be a non-empty one-dimensional sequence of positive values")
+        if piece_oks_sigma <= 0:
+            raise ValueError("piece_oks_sigma must be positive")
         if piece_quality_sigma <= 0 or board_quality_sigma <= 0:
             raise ValueError("Quality sigmas must be positive")
+        if alignment_support_delta < 0:
+            raise ValueError("alignment_support_delta must be non-negative")
+        if max_positives_per_gt <= 0:
+            raise ValueError("max_positives_per_gt must be positive")
+        if piece_candidate_radius <= 0:
+            raise ValueError("piece_candidate_radius must be positive")
+        if alignment_warmup_iterations < 0:
+            raise ValueError("alignment_warmup_iterations must be non-negative")
+        if min_board_area <= 0:
+            raise ValueError("min_board_area must be positive")
+        if homography_max_condition_number <= 1:
+            raise ValueError("homography_max_condition_number must be greater than one")
 
-        self.num_keypoints = len(board_oks_sigmas)
         self.num_classes = num_classes
         self.board_class_id = board_class_id
         self.classification_loss_weight = classification_loss_weight
@@ -446,18 +453,17 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.pose_cls_loss_weight = pose_cls_loss_weight
         self.pose_reg_loss_weight = pose_reg_loss_weight
         self.board_localization_loss_multiplier = board_localization_loss_multiplier
-        self.quality_warmup_steps = max(int(quality_warmup_steps), 0)
+        self.alignment_warmup_iterations = int(alignment_warmup_iterations)
         self.min_board_area = min_board_area
         self.homography_max_condition_number = homography_max_condition_number
 
-        self.register_buffer("oks_sigmas", torch.as_tensor(board_oks_sigmas, dtype=torch.float32), persistent=False)
-        self.register_buffer("piece_oks_sigma", torch.as_tensor(piece_oks_sigma, dtype=torch.float32), persistent=False)
-        self.register_buffer("_training_step", torch.zeros((), dtype=torch.long), persistent=False)
+        self.register_buffer("board_oks_sigmas", board_oks_sigmas, persistent=False)
+        self.register_buffer("piece_oks_sigma", torch.tensor(piece_oks_sigma, dtype=torch.float32), persistent=False)
+        self.register_buffer("_training_iteration", torch.zeros((), dtype=torch.long), persistent=False)
 
         self.assigner = YoloNASPoseTaskAlignedAssigner(
-            topk=bbox_assigner_topk,
-            alpha=bbox_assigned_alpha,
-            beta=bbox_assigned_beta,
+            alignment_support_delta=alignment_support_delta,
+            max_positives_per_gt=max_positives_per_gt,
             piece_candidate_radius=piece_candidate_radius,
             piece_sigma_q=piece_quality_sigma,
             board_sigma_q=board_quality_sigma,
@@ -492,11 +498,32 @@ class ChessYoloNASPoseLoss(nn.Module):
         }
 
     def _warmup_progress(self) -> float:
-        if not self.training or self.quality_warmup_steps == 0:
+        if not self.training or self.alignment_warmup_iterations == 0:
             return 1.0
-        progress = min(float(self._training_step.item()) / float(self.quality_warmup_steps), 1.0)
-        self._training_step.add_(1)
+        progress = min(float(self._training_iteration.item()) / float(self.alignment_warmup_iterations), 1.0)
+        self._training_iteration.add_(1)
         return progress
+
+    @staticmethod
+    def _positive_gt_groups(assign_result: YoloNASPoseAssignmentResult) -> Tensor:
+        """Return a group index for each positive anchor's (batch, GT) pair."""
+
+        positive_mask = assign_result.positive_mask  # [B, A]
+        batch_indices = torch.arange(positive_mask.shape[0], device=positive_mask.device)[:, None].expand_as(positive_mask)  # [B, A]
+        gt_pairs = torch.stack(
+            (batch_indices[positive_mask], assign_result.assigned_gt_index[positive_mask]), dim=-1
+        )  # [P, 2]
+        _, group_indices = torch.unique(gt_pairs, dim=0, return_inverse=True)  # [G, 2], [P]
+        return group_indices
+
+    @staticmethod
+    def _mean_per_gt(values: Tensor, group_indices: Tensor) -> Tensor:
+        """Average anchors within each GT, then give every GT equal weight."""
+
+        num_groups = int(group_indices.max().item()) + 1
+        sums = values.new_zeros(num_groups).scatter_add_(0, group_indices, values)  # [G]
+        counts = values.new_zeros(num_groups).scatter_add_(0, group_indices, torch.ones_like(values))  # [G]
+        return (sums / counts.clamp_min(1.0)).mean()
 
     def forward(
         self,
@@ -543,11 +570,12 @@ class ChessYoloNASPoseLoss(nn.Module):
 
         positive_mask = assign_result.positive_mask
         if positive_mask.any():
-            loss_cls = F.cross_entropy(
+            class_loss_per_anchor = F.cross_entropy(
                 pred_class_logits[positive_mask],
                 assign_result.assigned_labels[positive_mask],
-                reduction="mean",
-            )
+                reduction="none",
+            )  # [P]
+            loss_cls = self._mean_per_gt(class_loss_per_anchor, self._positive_gt_groups(assign_result))
         else:
             loss_cls = pred_class_logits.sum() * 0.0
 
@@ -615,13 +643,14 @@ class ChessYoloNASPoseLoss(nn.Module):
         applicable[~is_board, 0] = True
         visible = target_pose[..., 2].gt(0)
 
-        loss_pose_cls = F.binary_cross_entropy_with_logits(
-            predicted_logits[applicable], visible.float()[applicable], reduction="mean"
-        )
+        pose_cls_per_keypoint = F.binary_cross_entropy_with_logits(predicted_logits, visible.float(), reduction="none")
+        pose_cls_per_instance = (pose_cls_per_keypoint * applicable).sum(dim=-1) / applicable.sum(dim=-1).clamp_min(1)
+        positive_gt_groups = self._positive_gt_groups(assign_result)
+        loss_pose_cls = self._mean_per_gt(pose_cls_per_instance, positive_gt_groups)
 
         squared_distance = ((predicted_coords - target_pose[..., :2]) ** 2).sum(dim=-1)
-        sigmas = self.oks_sigmas.to(predicted_coords.device).expand(num_instances, -1).clone()
-        sigmas[~is_board] = self.piece_oks_sigma[0].to(predicted_coords.device)
+        sigmas = self.board_oks_sigmas.to(predicted_coords.device).expand(num_instances, -1).clone()
+        sigmas[~is_board] = self.piece_oks_sigma.to(predicted_coords.device)
         exponent = squared_distance / ((2.0 * sigmas).square() * instance_areas[:, None] * 2.0 + 1e-9)
         regression_per_keypoint = 1.0 - torch.exp(-exponent)
         regression_mask = visible & applicable
@@ -633,6 +662,7 @@ class ChessYoloNASPoseLoss(nn.Module):
                 regression_per_instance * self.board_localization_loss_multiplier,
                 regression_per_instance,
             )
-        # Every positive instance receives equal weight; g is not a loss weight.
-        loss_pose_reg = regression_per_instance.mean()
+        # g is not a loss weight. Anchors are averaged within each GT so an
+        # adaptive support size does not give easy objects more total weight.
+        loss_pose_reg = self._mean_per_gt(regression_per_instance, positive_gt_groups)
         return loss_pose_reg, loss_pose_cls

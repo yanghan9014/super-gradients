@@ -31,10 +31,9 @@ criterion_params:
     piece_quality_sigma: ${dataset_params.piece_quality_sigma}
     board_quality_sigma: ${dataset_params.board_quality_sigma}
     piece_candidate_radius: ${dataset_params.piece_candidate_radius}
-    quality_warmup_steps: 1000
-    bbox_assigner_topk: 13
-    bbox_assigned_alpha: 1.0
-    bbox_assigned_beta: 6.0
+    alignment_warmup_iterations: 1000
+    alignment_support_delta: 0.5
+    max_positives_per_gt: 32  # Safety cap; adaptive likelihood support normally selects fewer.
     # board_localization_loss_multiplier: 5.0
 
 optimizer: AdamW
