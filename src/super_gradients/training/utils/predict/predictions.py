@@ -82,7 +82,7 @@ class PoseEstimationPrediction(Prediction):
     image_shape: Tuple[int, int]
     pose_scores: Optional[np.ndarray] = None
     class_probabilities: Optional[np.ndarray] = None
-    quality_scores: Optional[np.ndarray] = None
+    objectness_scores: Optional[np.ndarray] = None
 
     def __init__(
         self,
@@ -93,7 +93,7 @@ class PoseEstimationPrediction(Prediction):
         image_shape: Tuple[int, int],
         pose_scores: Optional[np.ndarray] = None,
         class_probabilities: Optional[np.ndarray] = None,
-        quality_scores: Optional[np.ndarray] = None,
+        objectness_scores: Optional[np.ndarray] = None,
         **_,
     ):
         """
@@ -104,7 +104,7 @@ class PoseEstimationPrediction(Prediction):
         :param image_shape: Shape of the image the prediction is made on, (H, W).
         :param pose_scores: Per-keypoint confidence scores [Num Poses, Num Joints]
         :param class_probabilities: Conditional softmax class probabilities [Num Poses, Num Classes]
-        :param quality_scores: Scalar detection-quality scores [Num Poses, 1]
+        :param objectness_scores: Scalar foreground probabilities [Num Poses, 1]
         """
         self._validate_input(poses, scores, labels, bboxes_xyxy)
         self.poses = poses
@@ -114,7 +114,7 @@ class PoseEstimationPrediction(Prediction):
         self.image_shape = image_shape
         self.pose_scores = pose_scores
         self.class_probabilities = class_probabilities
-        self.quality_scores = quality_scores
+        self.objectness_scores = objectness_scores
 
     def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray, bboxes: Optional[np.ndarray]) -> None:
         if not isinstance(poses, np.ndarray):

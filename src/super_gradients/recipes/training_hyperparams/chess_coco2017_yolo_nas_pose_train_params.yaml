@@ -25,7 +25,7 @@ criterion_params:
     board_class_id: 12
     num_classes: ${dataset_params.num_classes}
     classification_loss_weight: 1.0
-    quality_loss_weight: 1.0
+    objectness_loss_weight: 1.0
     pose_cls_loss_weight: 1.0
     pose_reg_loss_weight: 50.0
     piece_quality_sigma: ${dataset_params.piece_quality_sigma}

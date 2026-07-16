@@ -444,7 +444,7 @@ class PoseEstimationPipeline(Pipeline):
             pred_bboxes = getattr(image_level_predictions, "bboxes_xyxy", None)
             pred_pose_scores = getattr(image_level_predictions, "pose_scores", None)
             pred_class_probabilities = getattr(image_level_predictions, "class_probabilities", None)
-            pred_quality_scores = getattr(image_level_predictions, "quality_scores", None)
+            pred_objectness_scores = getattr(image_level_predictions, "objectness_scores", None)
 
             poses_np = pred_poses.cpu().numpy() if torch.is_tensor(pred_poses) else pred_poses
             if poses_np is None:
@@ -471,7 +471,9 @@ class PoseEstimationPipeline(Pipeline):
             class_probabilities_np = (
                 pred_class_probabilities.cpu().numpy() if torch.is_tensor(pred_class_probabilities) else pred_class_probabilities
             )
-            quality_scores_np = pred_quality_scores.cpu().numpy() if torch.is_tensor(pred_quality_scores) else pred_quality_scores
+            objectness_scores_np = (
+                pred_objectness_scores.cpu().numpy() if torch.is_tensor(pred_objectness_scores) else pred_objectness_scores
+            )
 
             decoded_predictions.append(
                 PoseEstimationPrediction(
@@ -482,7 +484,7 @@ class PoseEstimationPipeline(Pipeline):
                     image_shape=image.shape,
                     pose_scores=pose_scores_np,
                     class_probabilities=class_probabilities_np,
-                    quality_scores=quality_scores_np,
+                    objectness_scores=objectness_scores_np,
                 )
             )
 

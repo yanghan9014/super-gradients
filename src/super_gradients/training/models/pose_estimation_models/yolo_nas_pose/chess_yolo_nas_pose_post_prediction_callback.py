@@ -17,10 +17,10 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
     """Threshold box-free predictions and retain task-specific candidates.
 
     Piece classes are selected from the conditional class distribution, and
-    pieces are quality-thresholded and top-k filtered without using their class
+    pieces are objectness-thresholded and top-k filtered without using their class
     probability as a gate. Duplicate pieces are resolved after homography
     projection by keeping the highest fused score per board square.
-    Boards are not quality-thresholded here.
+    Boards are not objectness-thresholded here.
     The single board candidate is selected by its fused detection score.
     """
 
@@ -34,8 +34,8 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             raise ValueError("post_nms_max_predictions must be less than pre_nms_max_predictions")
         super().__init__()
         # Keep the public SuperGradients argument name for compatibility, but
-        # interpret it as the minimum scalar quality d for piece anchors only.
-        self.piece_quality_threshold = pose_confidence_threshold
+        # interpret it as the minimum scalar objectness for piece anchors only.
+        self.piece_objectness_threshold = pose_confidence_threshold
         self.pre_nms_max_predictions = pre_nms_max_predictions
         self.post_nms_max_predictions = post_nms_max_predictions
 
@@ -45,18 +45,18 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         decoded_predictions: List[ChessPoseEstimationPredictions] = []
 
         for pred_values in zip(*predictions):
-            fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = pred_values
+            fused_scores, class_probabilities, objectness_scores, pose_coords, keypoint_scores = pred_values
 
-            quality = quality_scores.squeeze(-1)
+            objectness = objectness_scores.squeeze(-1)
             predicted_labels = class_probabilities.argmax(dim=1)
-            piece_mask = (predicted_labels < BOARD_CLASS_ID) & (quality >= self.piece_quality_threshold)
+            piece_mask = (predicted_labels < BOARD_CLASS_ID) & (objectness >= self.piece_objectness_threshold)
 
             piece_result = self._process_pieces(
-                confidence=quality[piece_mask],
+                confidence=objectness[piece_mask],
                 labels=predicted_labels[piece_mask],
                 fused_scores=fused_scores[piece_mask],
                 class_probabilities=class_probabilities[piece_mask],
-                quality_scores=quality_scores[piece_mask],
+                objectness_scores=objectness_scores[piece_mask],
                 pose_coords=pose_coords[piece_mask],
                 keypoint_scores=keypoint_scores[piece_mask],
             )
@@ -67,7 +67,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 confidence=board_confidence,
                 fused_scores=fused_scores[board_mask],
                 class_probabilities=class_probabilities[board_mask],
-                quality_scores=quality_scores[board_mask],
+                objectness_scores=objectness_scores[board_mask],
                 pose_coords=pose_coords[board_mask],
                 keypoint_scores=keypoint_scores[board_mask],
             )
@@ -83,7 +83,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 final_keypoint_scores = torch.cat([part["keypoint_scores"] for part in parts], dim=0)
                 final_fused_scores = torch.cat([part["fused_scores"] for part in parts], dim=0)
                 final_class_probabilities = torch.cat([part["class_probabilities"] for part in parts], dim=0)
-                final_quality_scores = torch.cat([part["quality_scores"] for part in parts], dim=0)
+                final_objectness_scores = torch.cat([part["objectness_scores"] for part in parts], dim=0)
                 final_labels = torch.cat([part["labels"] for part in parts], dim=0)
             else:
                 num_joints = pose_coords.shape[1]
@@ -91,7 +91,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 final_keypoint_scores = keypoint_scores.new_zeros((0, num_joints))
                 final_fused_scores = fused_scores.new_zeros((0, fused_scores.shape[-1]))
                 final_class_probabilities = class_probabilities.new_zeros((0, class_probabilities.shape[-1]))
-                final_quality_scores = quality_scores.new_zeros((0, 1))
+                final_objectness_scores = objectness_scores.new_zeros((0, 1))
                 final_labels = torch.zeros((0,), dtype=torch.long, device=fused_scores.device)
 
             limit = self.post_nms_max_predictions
@@ -103,7 +103,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                     labels=final_labels[:limit],
                     bboxes_xyxy=None,
                     class_probabilities=final_class_probabilities[:limit],
-                    quality_scores=final_quality_scores[:limit],
+                    objectness_scores=final_objectness_scores[:limit],
                 )
             )
 
@@ -115,7 +115,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         labels: Tensor,
         fused_scores: Tensor,
         class_probabilities: Tensor,
-        quality_scores: Tensor,
+        objectness_scores: Tensor,
         pose_coords: Tensor,
         keypoint_scores: Tensor,
     ) -> Optional[Dict[str, Tensor]]:
@@ -129,7 +129,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             "keypoint_scores": keypoint_scores[indices],
             "fused_scores": fused_scores[indices],
             "class_probabilities": class_probabilities[indices],
-            "quality_scores": quality_scores[indices],
+            "objectness_scores": objectness_scores[indices],
             "labels": labels[indices],
         }
 
@@ -138,7 +138,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
         confidence: Tensor,
         fused_scores: Tensor,
         class_probabilities: Tensor,
-        quality_scores: Tensor,
+        objectness_scores: Tensor,
         pose_coords: Tensor,
         keypoint_scores: Tensor,
     ) -> Optional[Dict[str, Tensor]]:
@@ -151,6 +151,6 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             "keypoint_scores": keypoint_scores[best].unsqueeze(0),
             "fused_scores": fused_scores[best].unsqueeze(0),
             "class_probabilities": class_probabilities[best].unsqueeze(0),
-            "quality_scores": quality_scores[best].unsqueeze(0),
+            "objectness_scores": objectness_scores[best].unsqueeze(0),
             "labels": torch.full((1,), BOARD_CLASS_ID, dtype=torch.long, device=confidence.device),
         }

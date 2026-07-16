@@ -19,7 +19,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
 
     It implements:
       - conditional multi-class classification (num_classes chess classes)
-      - scalar foreground/localization quality prediction
+      - scalar foreground objectness prediction
       - keypoint regression with num_joints keypoints per detection (x, y, confidence)
         on a single scale feature map.
 
@@ -49,7 +49,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         Initialize the ChessYoloNASPoseDFLHead.
 
         :param in_channels: Input channels.
-        :param bbox_inter_channels: Intermediate number of channels for class and quality prediction.
+        :param bbox_inter_channels: Intermediate number of channels for class and objectness prediction.
         :param pose_inter_channels: Intermediate number of channels for pose regression.
         :param pose_regression_blocks: Number of conv blocks in the pose branch.
         :param shared_stem: Whether to share the stem between the pose and bbox heads.
@@ -107,7 +107,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             self.pose_stem = ConvBNReLU(in_channels, pose_inter_channels, kernel_size=1, stride=1, padding=0, bias=False)
             self.bbox_stem = ConvBNReLU(in_channels, bbox_inter_channels, kernel_size=1, stride=1, padding=0, bias=False)
 
-        # ----- class / detection-quality branch -----
+        # ----- class / objectness branch -----
         first_cls_conv = (
             [ConvBNReLU(bbox_inter_channels, bbox_inter_channels, kernel_size=3, stride=1, padding=1, groups=groups, bias=False)]
             if groups
@@ -122,8 +122,8 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         # with softmax and supervised only on matched positive anchors.
         self.cls_pred = nn.Conv2d(bbox_inter_channels, self.num_classes, 1, 1, 0)
 
-        # Object-agnostic detection-quality logit: [B, 1, H, W].
-        self.quality_pred = nn.Conv2d(bbox_inter_channels, 1, 1, 1, 0)
+        # Object-agnostic foreground logit: [B, 1, H, W].
+        self.objectness_pred = nn.Conv2d(bbox_inter_channels, 1, 1, 1, 0)
 
         # ----- pose branch -----
         if pose_block_use_repvgg:
@@ -157,9 +157,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         :param x: Input feature map of shape [B, Cin, H, W]
-        :return: Tuple of [cls_output, quality_output, pose_regression, pose_logits]
+        :return: Tuple of [cls_output, objectness_output, pose_regression, pose_logits]
             - cls_output:      [B, num_classes, H, W]
-            - quality_output:  [B, 1, H, W]
+            - objectness_output: [B, 1, H, W]
             - pose_regression: [B, num_joints, 2, H, W]
             - pose_logits:     [B, num_joints, H, W]
         """
@@ -172,7 +172,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         cls_feat = self.cls_dropout_rate(cls_feat)
         cls_output = self.cls_pred(cls_feat)
 
-        quality_output = self.quality_pred(cls_feat)
+        objectness_output = self.objectness_pred(cls_feat)
 
         # pose regression
         pose_feat = self.pose_convs(pose_features)
@@ -188,11 +188,11 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_logits = pose_output[:, :, 2, :, :]        # [B, num_joints, H, W]
         pose_regression = pose_output[:, :, 0:2, :, :]  # [B, num_joints, 2, H, W]
 
-        return cls_output, quality_output, pose_regression, pose_logits
+        return cls_output, objectness_output, pose_regression, pose_logits
 
     def _initialize_biases(self):
         prior_bias = -math.log((1 - self.prior_prob) / self.prior_prob)
-        # Equal class biases are neutral under softmax. The low quality prior is
+        # Equal class biases are neutral under softmax. The low objectness prior is
         # useful because most dense anchors are background.
         torch.nn.init.zeros_(self.cls_pred.bias)
-        torch.nn.init.constant_(self.quality_pred.bias, prior_bias)
+        torch.nn.init.constant_(self.objectness_pred.bias, prior_bias)

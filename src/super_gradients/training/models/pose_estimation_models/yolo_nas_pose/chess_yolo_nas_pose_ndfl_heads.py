@@ -123,9 +123,9 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         :param feats: List of feature maps from the neck of different strides
         :return: Return value depends on the mode:
         If tracing, a tuple of 5 tensors (decoded predictions) is returned:
-        - fused_scores [B, Num Anchors, Num Classes] - class probability times detection quality
+        - fused_scores [B, Num Anchors, Num Classes] - class probability times objectness
         - class_probabilities [B, Num Anchors, Num Classes] - conditional softmax class probabilities
-        - quality_scores [B, Num Anchors, 1] - scalar foreground/localization quality
+        - objectness_scores [B, Num Anchors, 1] - scalar foreground probability
         - pred_pose_coords [B, Num Anchors, Num Keypoints, 2] - Predicted poses in XY format
         - pred_pose_scores [B, Num Anchors, Num Keypoints] - Predicted scores for each keypoint
 
@@ -134,7 +134,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         - raw outputs - a tuple of 7 elements in total, this is needed for training the model.
         """
 
-        cls_logits_list, quality_logits_list = [], []
+        cls_logits_list, objectness_logits_list = [], []
         pose_regression_list = []
         pose_logits_list = []
         num_anchors_list: List[int] = []
@@ -143,15 +143,15 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
             b, _, h, w = feat.shape
             height_mul_width = h * w
             num_anchors_list.append(height_mul_width)
-            cls_logit, quality_logit, pose_regression, pose_logits = getattr(self, f"head{i + 1}")(feat)
+            cls_logit, objectness_logit, pose_regression, pose_logits = getattr(self, f"head{i + 1}")(feat)
             cls_logits_list.append(cls_logit.reshape([b, -1, height_mul_width]))
-            quality_logits_list.append(quality_logit.reshape([b, 1, height_mul_width]))
+            objectness_logits_list.append(objectness_logit.reshape([b, 1, height_mul_width]))
 
             pose_regression_list.append(torch.permute(pose_regression.flatten(3), [0, 3, 1, 2]))  # [B, J, 2, H, W] -> [B, H * W, J, 2]
             pose_logits_list.append(torch.permute(pose_logits.flatten(2), [0, 2, 1]))  # [B, J, H, W] -> [B, H * W, J]
 
         cls_logits = torch.cat(cls_logits_list, dim=-1).permute(0, 2, 1)  # [B, Anchors, C]
-        quality_logits = torch.cat(quality_logits_list, dim=-1).permute(0, 2, 1)  # [B, Anchors, 1]
+        objectness_logits = torch.cat(objectness_logits_list, dim=-1).permute(0, 2, 1)  # [B, Anchors, 1]
 
         pose_regression_list = torch.cat(pose_regression_list, dim=1)  # [B, Anchors, J, 2]
         pose_logits_list = torch.cat(pose_logits_list, dim=1)  # [B, Anchors, J]
@@ -174,19 +174,19 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_regression_list *= stride_tensor.unsqueeze(0).unsqueeze(2)
 
         class_probabilities = cls_logits.softmax(dim=-1)
-        quality_scores = quality_logits.sigmoid()
-        fused_scores = class_probabilities * quality_scores
+        objectness_scores = objectness_logits.sigmoid()
+        fused_scores = class_probabilities * objectness_scores
         pred_pose_coords = pose_regression_list
         pred_pose_scores = pose_logits_list.sigmoid()
 
-        decoded_predictions = fused_scores, class_probabilities, quality_scores, pred_pose_coords, pred_pose_scores
+        decoded_predictions = fused_scores, class_probabilities, objectness_scores, pred_pose_coords, pred_pose_scores
 
         if torch.jit.is_tracing() or self.inference_mode:
             return decoded_predictions
 
         raw_predictions = (
             cls_logits,
-            quality_logits,
+            objectness_logits,
             pose_regression_list,
             pose_logits_list,
             anchor_points_inference * stride_tensor,

@@ -53,34 +53,34 @@ class YoloNASPoseDecodingModule(AbstractPoseEstimationDecodingModule):
         return self.num_pre_nms_predictions
 
     def get_output_names(self) -> List[str]:
-        return ["fused_scores", "class_probabilities", "quality_scores", "pose_coordinates", "keypoint_scores"]
+        return ["fused_scores", "class_probabilities", "objectness_scores", "pose_coordinates", "keypoint_scores"]
 
     def forward(self, inputs: Tuple[Tuple[Tensor, Tensor], Tuple[Tensor, ...]]):
         """
-        Top-k filter the box-free chess outputs by scalar quality without applying NMS.
+        Top-k filter the box-free chess outputs by scalar objectness without applying NMS.
 
         :param inputs: YoloNASPose model outputs
-        :return: fused scores, class probabilities, quality scores, pose coordinates,
-                 and keypoint scores for the highest-quality anchors.
+        :return: fused scores, class probabilities, objectness scores, pose coordinates,
+                 and keypoint scores for the highest-objectness anchors.
         """
         if torch.jit.is_tracing():
-            fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs
+            fused_scores, class_probabilities, objectness_scores, pose_coords, keypoint_scores = inputs
         else:
-            fused_scores, class_probabilities, quality_scores, pose_coords, keypoint_scores = inputs[0]
+            fused_scores, class_probabilities, objectness_scores, pose_coords, keypoint_scores = inputs[0]
 
         top_k = min(self.num_pre_nms_predictions, fused_scores.shape[1])
-        ranking_scores = quality_scores.squeeze(-1)
+        ranking_scores = objectness_scores.squeeze(-1)
         indices = torch.topk(ranking_scores, dim=1, k=top_k, largest=True, sorted=True).indices
 
         class_index = indices.unsqueeze(-1).expand(-1, -1, fused_scores.shape[-1])
-        quality_index = indices.unsqueeze(-1)
+        objectness_index = indices.unsqueeze(-1)
         pose_index = indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, pose_coords.shape[2], 2)
         keypoint_index = indices.unsqueeze(-1).expand(-1, -1, keypoint_scores.shape[2])
 
         return (
             fused_scores.gather(1, class_index),
             class_probabilities.gather(1, class_index),
-            quality_scores.gather(1, quality_index),
+            objectness_scores.gather(1, objectness_index),
             pose_coords.gather(1, pose_index),
             keypoint_scores.gather(1, keypoint_index),
         )

@@ -52,8 +52,9 @@ class YoloNASPoseAssignmentResult:
     assigned_labels: Tensor  # [B, A], background is num_classes
     assigned_poses: Tensor  # [B, A, J, 3]
     assigned_gt_index: Tensor  # [B, A]
-    assigned_quality: Tensor  # [B, A], detached g for the selected GT
     positive_mask: Tensor  # [B, A]
+    selected_anchors_per_gt: Optional[Tensor] = None  # [B, N], before conflict resolution
+    cap_hit_mask: Optional[Tensor] = None  # [B, N], relative support reached the safety cap
 
 
 def _shoelace_area(points: Tensor) -> Tensor:
@@ -215,7 +216,7 @@ def _points_inside_convex_quad(points: Tensor, quadrilateral: Tensor, eps: float
     return (cross >= -eps).all(dim=-1) | (cross <= eps).all(dim=-1)  # [A]
 
 
-def batch_localization_quality(
+def _batch_localization_log_quality(
     gt_labels: Tensor,
     gt_poses: Tensor,
     pred_pose_coords: Tensor,
@@ -226,7 +227,7 @@ def batch_localization_quality(
     board_class_id: int = 12,
     eps: float = 1e-9,
 ) -> Tensor:
-    """Compute detached pairwise localization quality g for every GT/anchor."""
+    """Compute detached pairwise log-localization quality without exponentiating."""
 
     gt_xy = gt_poses[..., :2].float().unsqueeze(2)  # [B, N, 1, J, 2]
     pred_xy = pred_pose_coords.detach().float().unsqueeze(1)  # [B, 1, A, J, 2]
@@ -245,13 +246,39 @@ def batch_localization_quality(
         normalized_error.new_full(is_board.shape, board_sigma_q),
         normalized_error.new_full(is_board.shape, piece_sigma_q),
     )  # [B, N]
-    quality = torch.exp(-normalized_error / (2.0 * sigma.unsqueeze(-1).square().clamp_min(eps)))  # [B, N, A]
+    log_quality = -normalized_error / (2.0 * sigma.unsqueeze(-1).square().clamp_min(eps))  # [B, N, A]
 
     piece_visible = gt_poses[..., 0, 2].gt(0)  # [B, N]
     board_visible = gt_poses[..., 2].gt(0).any(dim=-1)  # [B, N]
     valid_pose = torch.where(is_board, board_visible, piece_visible)  # [B, N]
     valid = pad_gt_mask.squeeze(-1).bool() & valid_pose & board_areas.gt(eps).unsqueeze(-1)  # [B, N]
-    return quality * valid.unsqueeze(-1)  # [B, N, A]
+    return log_quality.masked_fill(~valid.unsqueeze(-1), -torch.inf)  # [B, N, A]
+
+
+def batch_localization_quality(
+    gt_labels: Tensor,
+    gt_poses: Tensor,
+    pred_pose_coords: Tensor,
+    board_areas: Tensor,
+    pad_gt_mask: Tensor,
+    piece_sigma_q: float,
+    board_sigma_q: float,
+    board_class_id: int = 12,
+    eps: float = 1e-9,
+) -> Tensor:
+    """Compute detached pairwise localization quality g for every GT/anchor."""
+
+    return _batch_localization_log_quality(
+        gt_labels=gt_labels,
+        gt_poses=gt_poses,
+        pred_pose_coords=pred_pose_coords,
+        board_areas=board_areas,
+        pad_gt_mask=pad_gt_mask,
+        piece_sigma_q=piece_sigma_q,
+        board_sigma_q=board_sigma_q,
+        board_class_id=board_class_id,
+        eps=eps,
+    ).exp()  # [B, N, A]
 
 
 class YoloNASPoseTaskAlignedAssigner(nn.Module):
@@ -308,8 +335,9 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
                 assigned_labels=torch.full((batch_size, num_anchors), bg_index, dtype=torch.long, device=gt_labels.device),  # [B, A]
                 assigned_poses=pred_pose_coords.new_zeros((batch_size, num_anchors, num_keypoints, 3)),  # [B, A, J, 3]
                 assigned_gt_index=torch.zeros((batch_size, num_anchors), dtype=torch.long, device=gt_labels.device),  # [B, A]
-                assigned_quality=pred_pose_coords.new_zeros((batch_size, num_anchors)),  # [B, A]
                 positive_mask=torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=gt_labels.device),  # [B, A]
+                selected_anchors_per_gt=torch.zeros((batch_size, 0), dtype=torch.long, device=gt_labels.device),  # [B, 0]
+                cap_hit_mask=torch.zeros((batch_size, 0), dtype=torch.bool, device=gt_labels.device),  # [B, 0]
             )
 
         labels = gt_labels.squeeze(-1).long()  # [B, N]
@@ -343,7 +371,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         candidate_mask = torch.where(is_board.unsqueeze(-1), board_region.unsqueeze(1), piece_candidates)  # [B, N, A]
         candidate_mask &= valid_gt.unsqueeze(-1) & board_geometry.area_valid[:, None, None]  # [B, N, A]
 
-        quality = batch_localization_quality(
+        log_quality = _batch_localization_log_quality(
             gt_labels=gt_labels,
             gt_poses=gt_poses,
             pred_pose_coords=pred_pose_coords,
@@ -354,6 +382,18 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             board_class_id=self.board_class_id,
             eps=self.eps,
         )  # [B, N, A]
+        candidate_log_quality = log_quality.masked_fill(~candidate_mask, -torch.inf)  # [B, N, A]
+
+        # Normalize g across the candidate anchors without exponentiating:
+        # log(g / max_a(g)) = log(g) - max_a(log(g)). This is mathematically
+        # neutral for the max-relative support rule, but avoids early-training
+        # underflow where several very small g values would otherwise become 0.
+        best_log_quality = candidate_log_quality.max(dim=-1, keepdim=True).values  # [B, N, 1]
+        normalized_log_quality = torch.where(
+            torch.isfinite(best_log_quality),
+            candidate_log_quality - best_log_quality,
+            torch.full_like(candidate_log_quality, -torch.inf),
+        )  # [B, N, A]
 
         safe_labels = labels.clamp(min=0, max=num_classes - 1)  # [B, N]
         class_probabilities = pred_class_probabilities.detach().float().unsqueeze(1).expand(-1, num_gt, -1, -1)  # [B, N, A, C]
@@ -363,32 +403,33 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         ).squeeze(-1)  # [B, N, A]
 
         # Ranking is done in log space. During warmup the class exponent starts
-        # at zero, so assignment is geometry-only; d is deliberately never used.
+        # at zero, so assignment is geometry-only; objectness is deliberately
+        # never used because it is itself defined by the resulting assignment.
         class_exponent = float(class_alignment_progress)  # scalar tau in [0, 1]
         log_alignment = class_exponent * class_probabilities.clamp_min(self.eps).log()  # [B, N, A]
-        log_alignment += quality.clamp_min(self.eps).log()  # [B, N, A]
-        log_alignment = log_alignment.masked_fill(~candidate_mask, -torch.inf)  # [B, N, A]
+        log_alignment += normalized_log_quality  # [B, N, A]
 
         # Retain the likelihood support within delta of each GT's best anchor.
         # top-k is only a safety cap; it does not define the normal support size.
         best_log_alignment = log_alignment.max(dim=-1, keepdim=True).values  # [B, N, 1]
         support_threshold = best_log_alignment - self.alignment_support_delta  # [B, N, 1]
         safety_cap = min(self.max_positives_per_gt, num_anchors)  # M
+        full_support = torch.isfinite(log_alignment) & (log_alignment >= support_threshold)  # [B, N, A]
+        full_support_count = full_support.sum(dim=-1)  # [B, N]
+        cap_hit_mask = full_support_count >= self.max_positives_per_gt  # [B, N]
         top_values, top_indices = torch.topk(log_alignment, k=safety_cap, dim=-1)  # each [B, N, M]
         within_support = torch.isfinite(top_values) & (top_values >= support_threshold)  # [B, N, M]
         selected = torch.zeros_like(candidate_mask)  # [B, N, A]
         selected.scatter_(dim=-1, index=top_indices, src=within_support)  # [B, N, A]
+        selected_anchors_per_gt = selected.sum(dim=-1)  # [B, N]
 
         positive_mask = selected.any(dim=1)  # [B, A]
         # A shared anchor goes to the GT whose current pose is the best match.
-        conflict_quality = quality.masked_fill(~selected, -1.0)  # [B, N, A]
-        assigned_gt_index = conflict_quality.argmax(dim=1)  # [B, A]
+        conflict_log_quality = log_quality.masked_fill(~selected, -torch.inf)  # [B, N, A]
+        assigned_gt_index = conflict_log_quality.argmax(dim=1)  # [B, A]
 
         assigned_labels = labels.gather(1, assigned_gt_index)  # [B, A]
         assigned_labels = torch.where(positive_mask, assigned_labels, torch.full_like(assigned_labels, bg_index))  # [B, A]
-        assigned_quality = quality.gather(1, assigned_gt_index.unsqueeze(1)).squeeze(1)  # [B, A]
-        assigned_quality = torch.where(positive_mask, assigned_quality, torch.zeros_like(assigned_quality))  # [B, A]
-
         pose_index = assigned_gt_index[:, :, None, None].expand(-1, -1, num_keypoints, 3)  # [B, A, J, 3]
         assigned_poses = gt_poses.gather(1, pose_index)  # [B, A, J, 3]
 
@@ -396,14 +437,15 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             assigned_labels=assigned_labels,
             assigned_poses=assigned_poses,
             assigned_gt_index=assigned_gt_index,
-            assigned_quality=assigned_quality,
             positive_mask=positive_mask,
+            selected_anchors_per_gt=selected_anchors_per_gt,
+            cap_hit_mask=cap_hit_mask,
         )
 
 
 @register_loss(Losses.CHESS_YOLONAS_POSE_LOSS)
 class ChessYoloNASPoseLoss(nn.Module):
-    """Separate class, detection-quality, keypoint-score, and pose losses."""
+    """Separate conditional-class, objectness, keypoint-score, and pose losses."""
 
     def __init__(
         self,
@@ -412,7 +454,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         num_classes: int = 13,
         board_class_id: int = 12,
         classification_loss_weight: float = 1.0,
-        quality_loss_weight: float = 1.0,
+        objectness_loss_weight: float = 1.0,
         pose_cls_loss_weight: float = 1.0,
         pose_reg_loss_weight: float = 1.0,
         board_localization_loss_multiplier: float = 1.0,
@@ -449,7 +491,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.num_classes = num_classes
         self.board_class_id = board_class_id
         self.classification_loss_weight = classification_loss_weight
-        self.quality_loss_weight = quality_loss_weight
+        self.objectness_loss_weight = objectness_loss_weight
         self.pose_cls_loss_weight = pose_cls_loss_weight
         self.pose_reg_loss_weight = pose_reg_loss_weight
         self.board_localization_loss_multiplier = board_localization_loss_multiplier
@@ -525,6 +567,39 @@ class ChessYoloNASPoseLoss(nn.Module):
         counts = values.new_zeros(num_groups).scatter_add_(0, group_indices, torch.ones_like(values))  # [G]
         return (sums / counts.clamp_min(1.0)).mean()
 
+    @staticmethod
+    def _assignment_logging_values(
+        assign_result: YoloNASPoseAssignmentResult,
+        valid_gt_mask: Tensor,
+        reference: Tensor,
+    ) -> Tensor:
+        """Return detached per-batch assignment diagnostics for TensorBoard."""
+
+        if assign_result.selected_anchors_per_gt is None or assign_result.cap_hit_mask is None:
+            return reference.new_zeros(5)  # [min, median, mean, max, cap-hit rate]
+
+        selected_counts = assign_result.selected_anchors_per_gt[valid_gt_mask].float()  # [V]
+        if selected_counts.numel() == 0:
+            return reference.new_zeros(5)  # [min, median, mean, max, cap-hit rate]
+
+        sorted_counts = selected_counts.sort().values
+        middle = selected_counts.numel() // 2
+        median = (
+            sorted_counts[middle]
+            if selected_counts.numel() % 2
+            else 0.5 * (sorted_counts[middle - 1] + sorted_counts[middle])
+        )
+        cap_hit_rate = assign_result.cap_hit_mask[valid_gt_mask].float().mean()
+        return torch.stack(
+            (
+                selected_counts.min(),
+                median,
+                selected_counts.mean(),
+                selected_counts.max(),
+                cap_hit_rate,
+            )
+        ).to(reference)
+
     def forward(
         self,
         outputs: Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...]],
@@ -533,7 +608,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         _, predictions = outputs
         (
             pred_class_logits,
-            pred_quality_logits,
+            pred_objectness_logits,
             pred_pose_coords,
             pred_pose_logits,
             anchor_points,
@@ -579,22 +654,22 @@ class ChessYoloNASPoseLoss(nn.Module):
         else:
             loss_cls = pred_class_logits.sum() * 0.0
 
-        # Early positives first learn foregroundness, then anneal to the detached
-        # localization quality target. Background remains exactly zero.
-        quality_target = torch.zeros_like(pred_quality_logits.squeeze(-1))
-        positive_quality = (1.0 - warmup_progress) + warmup_progress * assign_result.assigned_quality
-        quality_target = torch.where(positive_mask, positive_quality, quality_target)
+        # Objectness is a binary foreground target. Localization quality is used
+        # only by the detached assigner above and never enters this target.
+        objectness_target = positive_mask.to(dtype=pred_objectness_logits.dtype)  # [B, A]
         has_gt = pad_gt_mask.squeeze(-1).any(dim=-1)
-        quality_valid_image = board_geometry.area_valid | ~has_gt
-        quality_valid = quality_valid_image[:, None].expand_as(quality_target)
-        if quality_valid.any():
-            loss_quality = F.binary_cross_entropy_with_logits(
-                pred_quality_logits.squeeze(-1)[quality_valid],
-                quality_target[quality_valid],
+        # Assignment depends on board-relative geometry. Do not label every
+        # anchor as background when an annotated image could not be assigned.
+        objectness_valid_image = board_geometry.area_valid | ~has_gt  # [B]
+        objectness_valid = objectness_valid_image[:, None].expand_as(objectness_target)  # [B, A]
+        if objectness_valid.any():
+            loss_objectness = F.binary_cross_entropy_with_logits(
+                pred_objectness_logits.squeeze(-1)[objectness_valid],
+                objectness_target[objectness_valid],
                 reduction="mean",
             )
         else:
-            loss_quality = pred_quality_logits.sum() * 0.0
+            loss_objectness = pred_objectness_logits.sum() * 0.0
 
         loss_pose_reg, loss_pose_cls = self._pose_losses(
             pred_pose_coords=pred_pose_coords,
@@ -602,20 +677,38 @@ class ChessYoloNASPoseLoss(nn.Module):
             assign_result=assign_result,
             board_areas=board_geometry.areas,
         )
+        valid_assignment_gt = pad_gt_mask.squeeze(-1).bool() & board_geometry.area_valid[:, None]  # [B, N]
+        assignment_logging_values = self._assignment_logging_values(
+            assign_result=assign_result,
+            valid_gt_mask=valid_assignment_gt,
+            reference=pred_class_logits,
+        )  # [5]
 
         loss_cls = loss_cls * self.classification_loss_weight
-        loss_quality = loss_quality * self.quality_loss_weight
+        loss_objectness = loss_objectness * self.objectness_loss_weight
         loss_pose_cls = loss_pose_cls * self.pose_cls_loss_weight
         loss_pose_reg = loss_pose_reg * self.pose_reg_loss_weight
-        loss = loss_cls + loss_quality + loss_pose_cls + loss_pose_reg
+        loss = loss_cls + loss_objectness + loss_pose_cls + loss_pose_reg
         log_losses = torch.stack(
-            (loss_cls.detach(), loss_quality.detach(), loss_pose_cls.detach(), loss_pose_reg.detach(), loss.detach())
+            (loss_cls.detach(), loss_objectness.detach(), loss_pose_cls.detach(), loss_pose_reg.detach(), loss.detach())
         )
+        log_losses = torch.cat((log_losses, assignment_logging_values.detach()))
         return loss, log_losses
 
     @property
     def component_names(self) -> List[str]:
-        return ["loss_cls", "loss_quality", "loss_pose_cls", "loss_pose_reg", "loss"]
+        return [
+            "loss_cls",
+            "loss_objectness",
+            "loss_pose_cls",
+            "loss_pose_reg",
+            "loss",
+            "selected_anchors_per_gt_min",
+            "selected_anchors_per_gt_median",
+            "selected_anchors_per_gt_mean",
+            "selected_anchors_per_gt_max",
+            "anchor_cap_hit_rate",
+        ]
 
     def _pose_losses(
         self,
