@@ -128,7 +128,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 final_poses = pred_pose_coords.new_zeros((0, num_joints, 2))
                 final_pose_scores = pred_pose_scores.new_zeros((0, num_joints))
                 final_scores = pred_bboxes_conf.new_zeros((0,))
-                final_labels = pred_cls_label.new_zeros((0,), dtype=torch.long)
+                final_labels = pred_bboxes_conf.new_zeros((0,), dtype=torch.long)
                 final_bboxes = pred_bboxes_xyxy.new_zeros((0, 4))
 
             k = self.post_nms_max_predictions
