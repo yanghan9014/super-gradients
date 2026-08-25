@@ -124,11 +124,9 @@ val_dataset_params:
 
 train_dataloader_params:
   dataset: ChessPoseEstimationDataset
+  shuffle: True
   batch_size: 32
   num_workers: 24
-  sampler:
-    ChessHardExampleSampler:
-      hard_factors_file: "hard_localization_weights.json"
   drop_last: True
   pin_memory: False
   collate_fn: ChessYoloNASPoseCollateFN

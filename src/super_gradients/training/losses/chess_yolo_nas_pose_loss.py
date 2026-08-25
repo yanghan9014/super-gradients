@@ -339,7 +339,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         num_classes: int = 1,
         bbox_assigner_topk: int = 13,
         bbox_assigned_alpha: float = 1.0,
-        bbox_assigned_beta: float = 6.0,
+        bbox_assigned_beta: float = 4.0,
         assigner_multiply_by_pose_oks: bool = False,
         rescale_pose_loss_with_assigned_score: bool = False,
         average_losses_in_ddp: bool = False,
