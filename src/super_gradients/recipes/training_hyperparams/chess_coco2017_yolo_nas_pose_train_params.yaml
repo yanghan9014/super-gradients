@@ -34,6 +34,8 @@ criterion_params:
     pose_classification_loss_type: focal
     rescale_pose_loss_with_assigned_score: True
     assigner_multiply_by_pose_oks: True
+    # From this epoch on, a board scored 180 degrees out is accepted as correct.
+    rotation_invariant_start_epoch: 500
     # board_localization_loss_multiplier: 5.0
 
 optimizer: AdamW
@@ -53,6 +55,7 @@ valid_metrics_list:
       num_joints: ${dataset_params.num_joints}
       oks_sigmas: ${dataset_params.oks_sigmas}
       max_objects_per_image: 50
+      board_class_id: 12
       post_prediction_callback:
         _target_: super_gradients.training.models.pose_estimation_models.yolo_nas_pose.ChessYoloNASPosePostPredictionCallback
         pose_confidence_threshold: 0.35
@@ -63,6 +66,7 @@ valid_metrics_list:
 run_validation_freq: 10
 
 phase_callbacks:
+  - ChessBoardRotationInvarianceCallback
   # You can uncomment this callback to visualize predictions during training
   - ExtremeBatchPoseEstimationVisualizationCallback:
       keypoint_colors: ${dataset_params.keypoint_colors}
@@ -97,7 +101,7 @@ phase_callbacks:
 
 pre_prediction_callback:
 
-metric_to_watch: 'AP'
+metric_to_watch: 'Board_Relaxed_AP'
 greater_metric_to_watch_is_better: True
 
 _convert_: all

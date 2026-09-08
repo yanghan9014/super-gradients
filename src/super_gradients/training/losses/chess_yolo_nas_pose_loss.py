@@ -42,6 +42,12 @@ class YoloNASPoseBoxesAssignmentResult:
     assigned_crowd: Tensor
 
 
+# Board keypoint order is (a1, a8, h1, h8, center, a45, h45, 1de, 8de). Rotating the board 180
+# degrees relabels a1<->h8, a8<->h1, a45<->h45 and 1de<->8de, leaving the center where it is. This
+# is the only relabelling that keeps square colours consistent, since a1 must sit on a dark square.
+BOARD_180_PERMUTATION = [3, 2, 1, 0, 4, 6, 5, 8, 7]
+
+
 def batch_pose_oks(
     gt_keypoints: torch.Tensor,
     pred_keypoints: torch.Tensor,
@@ -347,6 +353,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         piece_oks_sigma: Optional[Union[List[float], np.ndarray, Tensor]] = None,
         board_class_id: int = 12,
         board_localization_loss_multiplier: float = 1.0,
+        rotation_invariant_start_epoch: Optional[int] = None,
     ):
         """
         :param oks_sigmas:                 OKS sigmas for pose estimation. Array of [Num Keypoints].
@@ -357,6 +364,8 @@ class ChessYoloNASPoseLoss(nn.Module):
         :param dfl_loss_weight:            DFL loss weight
         :param pose_cls_loss_weight:       Pose classification loss weight
         :param pose_reg_loss_weight:       Pose regression loss weight
+        :param rotation_invariant_start_epoch: Epoch from which either board labelling is accepted; None disables.
+                                           See _resolve_board_orientation.
         :param average_losses_in_ddp:      Whether to average losses in DDP mode. In theory, enabling this option
                                            should have the positive impact on model accuracy since it would smooth out
                                            influence of batches with small number of objects.
@@ -393,6 +402,9 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.pose_classification_loss_type = pose_classification_loss_type
         self.rescale_pose_loss_with_assigned_score = rescale_pose_loss_with_assigned_score
         self.average_losses_in_ddp = average_losses_in_ddp
+        self.rotation_invariant_start_epoch = rotation_invariant_start_epoch
+        # Kept up to date by ChessBoardRotationInvarianceCallback.
+        self.current_epoch = 0
 
     @torch.no_grad()
     def _unpack_flat_targets(self, targets: Tuple[Tensor, ...], batch_size: int) -> Mapping[str, torch.Tensor]:
@@ -573,6 +585,45 @@ class ChessYoloNASPoseLoss(nn.Module):
         loss_right = torch.nn.functional.cross_entropy(pred_dist, target_right, reduction="none") * weight_right
         return (loss_left + loss_right).mean(dim=-1, keepdim=True)
 
+    def _resolve_board_orientation(self, predicted_coords: Tensor, target_coords: Tensor, target_visibility: Tensor) -> Tuple[Tensor, Tensor]:
+        """Score each board against whichever of the two valid corner labellings it is closer to.
+
+        A board with few or no pieces is symmetric under a 180 degree rotation, so nothing in the
+        pixels says which end is a1. Scoring against one fixed labelling punishes a coin flip the
+        model cannot win, and it responds by hedging: the predicted corners drift in towards the
+        center, which costs us the homography. Accepting either labelling lets it commit to sharp
+        corners, and the app resolves the flip downstream.
+
+        The choice is made once per board and applied to all nine keypoints, so a single board
+        cannot be scored half under one labelling and half under the other.
+
+        :param predicted_coords:  [Num Instances, Num Joints, 2] - (x, y)
+        :param target_coords:     [Num Instances, Num Joints, 2] - (x, y)
+        :param target_visibility: [Num Instances, Num Joints, 1] - Visibility of each joint
+        :return:                  (target_coords, target_visibility) under the closer labelling
+        """
+        if target_coords.shape[1] != len(BOARD_180_PERMUTATION):
+            return target_coords, target_visibility
+
+        permutation = torch.as_tensor(BOARD_180_PERMUTATION, device=target_coords.device)
+        rotated_coords = target_coords[:, permutation]
+        rotated_visibility = target_visibility[:, permutation]
+
+        # Selected on plain squared distance rather than the OKS-shaped regression loss, which
+        # saturates towards 1 and would read as a near-tie whenever both labellings score badly.
+        def mean_squared_distance(coords: Tensor, visibility: Tensor) -> Tensor:
+            visible = (visibility > 0).float()
+            distance = ((predicted_coords - coords) ** 2).sum(dim=-1, keepdim=True)
+            return (distance * visible).sum(dim=1) / (visible.sum(dim=1) + 1e-9)
+
+        use_rotated = mean_squared_distance(rotated_coords, rotated_visibility) < mean_squared_distance(target_coords, target_visibility)
+        use_rotated = use_rotated.unsqueeze(-1)  # [Num Instances, 1, 1], to broadcast over joints
+
+        return (
+            torch.where(use_rotated, rotated_coords, target_coords),
+            torch.where(use_rotated, rotated_visibility, target_visibility),
+        )
+
     def _keypoint_loss(
         self,
         predicted_coords: Tensor,
@@ -708,11 +759,20 @@ class ChessYoloNASPoseLoss(nn.Module):
                 reg_b, cls_b, reg_p, cls_p = 0.0, 0.0, 0.0, 0.0
 
                 if mask_board.any():
+                    board_target_coords = gt_pose_coords[mask_board]
+                    board_target_visibility = gt_pose_visibility[mask_board]
+                    if self.rotation_invariant_start_epoch is not None and self.current_epoch >= self.rotation_invariant_start_epoch:
+                        board_target_coords, board_target_visibility = self._resolve_board_orientation(
+                            predicted_coords=pred_pose_coords[mask_board],
+                            target_coords=board_target_coords,
+                            target_visibility=board_target_visibility,
+                        )
+
                     reg_b, cls_b = self._keypoint_loss(
                         predicted_coords=pred_pose_coords[mask_board],
-                        target_coords=gt_pose_coords[mask_board],
+                        target_coords=board_target_coords,
                         predicted_logits=pred_pose_logits[mask_board],
-                        target_visibility=gt_pose_visibility[mask_board],
+                        target_visibility=board_target_visibility,
                         assigned_scores=bbox_weight[mask_board] if self.rescale_pose_loss_with_assigned_score else None,
                         assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
                         area=area[mask_board],

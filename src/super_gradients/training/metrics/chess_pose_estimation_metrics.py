@@ -1,5 +1,5 @@
 import itertools
-from typing import Dict, Union, List, Optional, Iterable, Any
+from typing import Dict, Union, List, Optional, Iterable, Any, Tuple
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from super_gradients.common.object_names import Metrics
 from super_gradients.common.registry.registry import register_metric
 from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback
 from super_gradients.module_interfaces.pose_estimation_post_prediction_callback import ChessPoseEstimationPredictions
+from super_gradients.training.losses.chess_yolo_nas_pose_loss import BOARD_180_PERMUTATION
 from super_gradients.training.metrics.pose_estimation_utils import compute_img_keypoint_matching, compute_visible_bbox_xywh
 from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.utils import convert_to_tensor
@@ -52,6 +53,7 @@ class ChessPoseEstimationMetrics(Metric):
         iou_thresholds: Optional[Iterable] = None,
         recall_thresholds: Optional[Iterable] = None,
         iou_thresholds_to_report: Optional[Iterable] = None,
+        board_class_id: Optional[int] = None,
     ):
         """
         Compute the AP & AR metrics for pose estimation. By default, this class returns only AP and AR values.
@@ -75,11 +77,18 @@ class ChessPoseEstimationMetrics(Metric):
         :param: iou_thresholds_to_report: List of IoU thresholds to return in metric. By default, only AP/AR metrics are returned, but one
                                           may also request to return AP_0.5,AP_0.75,AR_0.5,AR_0.75 setting `iou_thresholds_to_report=[0.5, 0.75]`
 
+        :param board_class_id:            Class id of the board. When set, four extra components are reported that
+                                          score the board on its own: Board_AP/Board_AR under the annotated corner
+                                          labelling, and Board_Relaxed_AP/Board_Relaxed_AR which also accept a board
+                                          scored 180 degrees out. The overall AP/AR average over all 13 classes, so a
+                                          change confined to the board is diluted there and easy to miss.
+
         """
         super().__init__(dist_sync_on_step=False)
         self.num_joints = num_joints
         self.max_objects_per_image = max_objects_per_image
         self.stats_names = ["AP", "AR"]
+        self.board_class_id = board_class_id
 
         if recall_thresholds is None:
             recall_thresholds = np.linspace(0.0, 1.00, int(np.round((1.00 - 0.0) / 0.01)) + 1, endpoint=True, dtype=np.float32)
@@ -102,6 +111,9 @@ class ChessPoseEstimationMetrics(Metric):
             self.stats_names += [f"AR_{t:.2f}" for t in self.iou_thresholds_to_report]
         else:
             self.iou_thresholds_to_report = None
+
+        if board_class_id is not None:
+            self.stats_names += ["Board_AP", "Board_AR", "Board_Relaxed_AP", "Board_Relaxed_AR"]
 
         self.greater_component_is_better = dict((k, True) for k in self.stats_names)
 
@@ -128,9 +140,11 @@ class ChessPoseEstimationMetrics(Metric):
         self.world_size = None
         self.rank = None
         self.add_state("predictions", default=[], dist_reduce_fx=None)
+        self.add_state("board_relaxed_predictions", default=[], dist_reduce_fx=None)
 
     def reset(self) -> None:
         self.predictions.clear()
+        self.board_relaxed_predictions.clear()
 
     @torch.no_grad()
     def update(
@@ -229,6 +243,36 @@ class ChessPoseEstimationMetrics(Metric):
                 gt_areas=gt_areas[i] if gt_areas is not None else None,
                 gt_labels=gt_labels[i] if gt_labels is not None else None,
             )
+
+    def _resolve_board_orientation(self, predicted_poses: Tensor, predicted_scores: Tensor, targets: Tensor, targets_visibilities: Tensor):
+        """Relabel each ground truth board to whichever of its two orientations the best prediction is closer to.
+
+        A board with few or no pieces reads the same either way up, so scoring against one fixed labelling
+        counts a coin flip as a miss. This mirrors ChessYoloNASPoseLoss._resolve_board_orientation so that
+        the relaxed metric measures the same thing the relaxed loss is training towards.
+
+        :param predicted_poses:      Predicted board poses of shape (num_predictions, num_joints, 3)
+        :param predicted_scores:     Confidence of each predicted board, shape (num_predictions,)
+        :param targets:              Groundtruth board corners of shape (num_targets, num_joints, 2)
+        :param targets_visibilities: Groundtruth visibility of shape (num_targets, num_joints)
+        :return:                     (targets, targets_visibilities) under the closer labelling
+        """
+        if len(predicted_poses) == 0 or len(targets) == 0 or targets.shape[1] != len(BOARD_180_PERMUTATION):
+            return targets, targets_visibilities
+
+        permutation = torch.as_tensor(BOARD_180_PERMUTATION, device=targets.device)
+        rotated = targets[:, permutation]
+        rotated_visibilities = targets_visibilities[:, permutation]
+
+        reference = predicted_poses[torch.argmax(predicted_scores)][:, 0:2]
+        distance = ((targets - reference) ** 2).sum(dim=-1).mean(dim=-1)
+        rotated_distance = ((rotated - reference) ** 2).sum(dim=-1).mean(dim=-1)
+        use_rotated = rotated_distance < distance
+
+        return (
+            torch.where(use_rotated.view(-1, 1, 1), rotated, targets),
+            torch.where(use_rotated.view(-1, 1), rotated_visibilities, targets_visibilities),
+        )
 
     def update_single_image(
         self,
@@ -354,6 +398,40 @@ class ChessPoseEstimationMetrics(Metric):
                 (int(class_id), mr.preds_matched.cpu(), mr.preds_to_ignore.cpu(), mr.preds_scores.cpu(), int(mr.num_targets))
             )
 
+            # Only the board is orientation-ambiguous, so it is the only class scored a second way.
+            if self.board_class_id is not None and int(class_id) == self.board_class_id:
+                relaxed_targets, relaxed_visibilities = self._resolve_board_orientation(
+                    predicted_poses[cls_pred_mask], predicted_scores[cls_pred_mask], targets, targets_visibilities
+                )
+                relaxed_mr = compute_img_keypoint_matching(
+                    predicted_poses[cls_pred_mask],
+                    predicted_scores[cls_pred_mask],
+                    #
+                    targets=relaxed_targets,
+                    targets_visibilities=relaxed_visibilities,
+                    targets_areas=targets_areas,
+                    targets_bboxes=targets_bboxes,
+                    targets_ignored=targets_ignored,
+                    #
+                    crowd_targets=empty_crowd_targets,
+                    crowd_visibilities=empty_crowd_visibilities,
+                    crowd_targets_areas=empty_crowd_targets_areas,
+                    crowd_targets_bboxes=empty_crowd_targets_bboxes,
+                    #
+                    iou_thresholds=self.iou_thresholds.to("cpu"),
+                    sigmas=self.oks_sigmas.to("cpu"),
+                    top_k=self.max_objects_per_image,
+                )
+                self.board_relaxed_predictions.append(
+                    (
+                        int(class_id),
+                        relaxed_mr.preds_matched.cpu(),
+                        relaxed_mr.preds_to_ignore.cpu(),
+                        relaxed_mr.preds_scores.cpu(),
+                        int(relaxed_mr.num_targets),
+                    )
+                )
+
     def _sync_dist(self, dist_sync_fn=None, process_group=None):
         """
         When in distributed mode, stats are aggregated after each forward pass to the metric state. Since these have all
@@ -373,12 +451,19 @@ class ChessPoseEstimationMetrics(Metric):
             torch.distributed.all_gather_object(gathered_state_dicts, local_state_dict)
             self.predictions = list(itertools.chain(*gathered_state_dicts))
 
-    def compute(self) -> Dict[str, Union[float, torch.Tensor]]:
-        """Compute the metrics for all the accumulated results.
-        :return: Metrics of interest
+            local_state_dict = self.board_relaxed_predictions
+            gathered_state_dicts = [None] * self.world_size
+            torch.distributed.all_gather_object(gathered_state_dicts, local_state_dict)
+            self.board_relaxed_predictions = list(itertools.chain(*gathered_state_dicts))
+
+    def _aggregate(self, predictions) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """Reduce accumulated per-image matches into per-class precision and recall.
+
+        :param predictions: List of (class_id, preds_matched, preds_to_ignore, preds_scores, num_targets)
+        :return:            (precision, recall, classes), the arrays being [num_iou_thresholds, num_classes]
+                            with -1 in columns that had no targets.
         """
         T = len(self.iou_thresholds)
-        predictions = self.predictions  # All gathered by this time
         classes = sorted({x[0] for x in predictions}) if len(predictions) else []
         K = max(1, len(classes))
 
@@ -418,6 +503,14 @@ class ChessPoseEstimationMetrics(Metric):
                 precision[:, cls_idx] = cls_precision.cpu().numpy()
                 recall[:, cls_idx] = cls_recall.cpu().numpy()
 
+        return precision, recall, classes
+
+    def compute(self) -> Dict[str, Union[float, torch.Tensor]]:
+        """Compute the metrics for all the accumulated results.
+        :return: Metrics of interest
+        """
+        precision, recall, classes = self._aggregate(self.predictions)
+
         def summarize(s):
             if len(s[s > -1]) == 0:
                 mean_s = -1
@@ -433,5 +526,21 @@ class ChessPoseEstimationMetrics(Metric):
                 mask = np.where(t == self.iou_thresholds)[0]
                 metrics[f"AP_{t:.2f}"] = summarize(precision[mask])
                 metrics[f"AR_{t:.2f}"] = summarize(recall[mask])
+
+        if self.board_class_id is not None:
+            # Board scored on its own, under the annotated labelling and then allowing a 180 degree flip.
+            # Board_AP is expected to fall once the relaxed loss kicks in, since the model stops being
+            # pushed towards one particular labelling; Board_Relaxed_AP is the one that should hold or rise.
+            if self.board_class_id in classes:
+                board_column = slice(classes.index(self.board_class_id), classes.index(self.board_class_id) + 1)
+                metrics["Board_AP"] = summarize(precision[:, board_column])
+                metrics["Board_AR"] = summarize(recall[:, board_column])
+            else:
+                metrics["Board_AP"] = -1
+                metrics["Board_AR"] = -1
+
+            relaxed_precision, relaxed_recall, _ = self._aggregate(self.board_relaxed_predictions)
+            metrics["Board_Relaxed_AP"] = summarize(relaxed_precision)
+            metrics["Board_Relaxed_AR"] = summarize(relaxed_recall)
 
         return metrics

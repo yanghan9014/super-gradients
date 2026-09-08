@@ -739,6 +739,22 @@ class YoloXTrainingStageSwitchCallback(TrainingStageSwitchCallbackBase):
         context.criterion.use_l1 = True
 
 
+@register_callback()
+class ChessBoardRotationInvarianceCallback(PhaseCallback):
+    """Tell ChessYoloNASPoseLoss which epoch it is, so it can relax board orientation on schedule.
+
+    The epoch is synced every epoch rather than fired once on the threshold, so that a run resumed
+    from a checkpoint past the switch still comes back with the relaxation enabled.
+    """
+
+    def __init__(self):
+        super(ChessBoardRotationInvarianceCallback, self).__init__(phase=Phase.TRAIN_EPOCH_START)
+
+    def __call__(self, context: PhaseContext):
+        if context.criterion is not None:
+            context.criterion.current_epoch = context.epoch
+
+
 @register_callback(Callbacks.ROBOFLOW_RESULT_CALLBACK)
 class RoboflowResultCallback(Callback):
     """Append the training results to a csv file. Be aware that this does not fully overwrite the existing file, just appends."""
