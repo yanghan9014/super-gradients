@@ -56,6 +56,10 @@ valid_metrics_list:
       oks_sigmas: ${dataset_params.oks_sigmas}
       max_objects_per_image: 50
       board_class_id: 12
+      # Every reference point must stay within this many squares on EACH rectified axis.
+      # Applies only to Board_* metrics; overall AP/AR retain their original OKS matching.
+      board_max_square_error: 0.25
+      board_keypoint_confidence_threshold: 0.7
       post_prediction_callback:
         _target_: super_gradients.training.models.pose_estimation_models.yolo_nas_pose.ChessYoloNASPosePostPredictionCallback
         pose_confidence_threshold: 0.35
