@@ -35,7 +35,7 @@ criterion_params:
     rescale_pose_loss_with_assigned_score: True
     assigner_multiply_by_pose_oks: True
     # From this epoch on, a board scored 180 degrees out is accepted as correct.
-    rotation_invariant_start_epoch: 500
+    rotation_invariant_start_epoch: 5000
     # board_localization_loss_multiplier: 5.0
 
 optimizer: AdamW
@@ -96,7 +96,7 @@ phase_callbacks:
       monitor: AP
       mode: max
       min_delta: 0.0001
-      patience: 100
+      patience: 1000
       verbose: True
 
   - S3SyncCallback:
