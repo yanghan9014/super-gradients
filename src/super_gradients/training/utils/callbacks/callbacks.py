@@ -755,6 +755,37 @@ class ChessBoardRotationInvarianceCallback(PhaseCallback):
             context.criterion.current_epoch = context.epoch
 
 
+@register_callback()
+class ChessPieceConfusionCallback(PhaseCallback):
+    """Log the app-pipeline piece confusion matrix after each validation run.
+
+    Reads ChessPoseEstimationMetrics(piece_metrics=True) from the validation metrics, before they
+    reset for the next run. Writes a heatmap image plus per-class false positive (empty square read
+    as the piece) and false negative (annotated piece with no reading) counts as scalars.
+    """
+
+    def __init__(self):
+        super(ChessPieceConfusionCallback, self).__init__(phase=Phase.VALIDATION_EPOCH_END)
+
+    @multi_process_safe
+    def __call__(self, context: PhaseContext):
+        from super_gradients.training.metrics.chess_piece_metrics import EMPTY, PIECE_NAMES, confusion_figure
+
+        metrics = context.metrics_compute_fn
+        candidates = metrics.values() if isinstance(metrics, MetricCollection) else [metrics]
+        metric = next((m for m in candidates if getattr(m, "piece_metrics", False)), None)
+        if metric is None or context.sg_logger is None:
+            return
+        confusion = metric.piece_confusion_matrix()
+        if not confusion.any():
+            return
+        figure = confusion_figure(confusion, title=f"Piece confusion, epoch {context.epoch}")
+        context.sg_logger.add_figure("Valid_Piece_Confusion", figure, global_step=context.epoch)
+        for cls, name in enumerate(PIECE_NAMES):
+            context.sg_logger.add_scalar(f"Valid_Piece_FP/{name}", float(confusion[EMPTY, cls]), global_step=context.epoch)
+            context.sg_logger.add_scalar(f"Valid_Piece_FN/{name}", float(confusion[cls, EMPTY]), global_step=context.epoch)
+
+
 @register_callback(Callbacks.ROBOFLOW_RESULT_CALLBACK)
 class RoboflowResultCallback(Callback):
     """Append the training results to a csv file. Be aware that this does not fully overwrite the existing file, just appends."""

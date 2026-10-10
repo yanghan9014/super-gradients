@@ -60,6 +60,14 @@ valid_metrics_list:
       # Applies only to Board_* metrics; overall AP/AR retain their original OKS matching.
       board_max_square_error: 0.25
       board_keypoint_confidence_threshold: 0.7
+      # Piece_AP/Piece_AR and the confusion matrix read the raw output the way the iOS app does
+      # (no NMS, its thresholds, its homography); post_prediction_callback below does not apply.
+      piece_metrics: True
+      piece_confidence_threshold: 0.05
+      piece_board_keypoint_threshold: 0.2
+      piece_image_size:
+        - ${dataset_params.image_width}
+        - ${dataset_params.image_height}
       post_prediction_callback:
         _target_: super_gradients.training.models.pose_estimation_models.yolo_nas_pose.ChessYoloNASPosePostPredictionCallback
         pose_confidence_threshold: 0.35
@@ -71,6 +79,7 @@ run_validation_freq: 10
 
 phase_callbacks:
   - ChessBoardRotationInvarianceCallback
+  - ChessPieceConfusionCallback
   # You can uncomment this callback to visualize predictions during training
   - ExtremeBatchPoseEstimationVisualizationCallback:
       keypoint_colors: ${dataset_params.keypoint_colors}

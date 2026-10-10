@@ -19,6 +19,7 @@ from super_gradients.training.utils.callbacks.callbacks import (
     TrainingStageSwitchCallbackBase,
     YoloXTrainingStageSwitchCallback,
     ChessBoardRotationInvarianceCallback,
+    ChessPieceConfusionCallback,
     TestLRCallback,
     TimerCallback,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "TrainingStageSwitchCallbackBase",
     "YoloXTrainingStageSwitchCallback",
     "ChessBoardRotationInvarianceCallback",
+    "ChessPieceConfusionCallback",
     "CallbackHandler",
     "TestLRCallback",
     "PPYoloETrainingStageSwitchCallback",

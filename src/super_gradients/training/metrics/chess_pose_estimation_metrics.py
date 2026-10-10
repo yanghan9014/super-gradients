@@ -13,6 +13,7 @@ from super_gradients.common.registry.registry import register_metric
 from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback
 from super_gradients.module_interfaces.pose_estimation_post_prediction_callback import ChessPoseEstimationPredictions
 from super_gradients.training.metrics.board_homography_metrics import compute_board_homography_matching
+from super_gradients.training.metrics.chess_piece_metrics import annotated_squares, app_square_readings, match_squares
 from super_gradients.training.metrics.pose_estimation_utils import compute_img_keypoint_matching, compute_visible_bbox_xywh
 from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.utils import convert_to_tensor
@@ -56,6 +57,10 @@ class ChessPoseEstimationMetrics(Metric):
         board_class_id: Optional[int] = None,
         board_max_square_error: float = 0.25,
         board_keypoint_confidence_threshold: float = 0.7,
+        piece_metrics: bool = False,
+        piece_confidence_threshold: float = 0.05,
+        piece_board_keypoint_threshold: float = 0.2,
+        piece_image_size: Tuple[int, int] = (640, 480),
     ):
         """
         Compute the AP & AR metrics for pose estimation. By default, this class returns only AP and AR values.
@@ -89,6 +94,15 @@ class ChessPoseEstimationMetrics(Metric):
                                           Defaults to 0.7, matching ChessVision inference. Missing annotation reference
                                           points are reconstructed from the annotation homography. Invalid homographies
                                           never match; unevaluable annotations remain in the board recall denominator.
+        :param piece_metrics:             Enables Piece_AP/Piece_AR and a piece confusion matrix, computed from the raw
+                                          model output the way the iOS app reads a frame (see chess_piece_metrics): no NMS,
+                                          the most confident board, its homography, the most confident piece per square.
+                                          A reading is correct when its square holds an annotated piece of the same class.
+                                          Independent of post_prediction_callback; overall AP/AR are unchanged.
+        :param piece_confidence_threshold: The app's AppConfig.confidenceThreshold, for pieces and boards alike.
+        :param piece_board_keypoint_threshold: The app's AppConfig.boardKeypointConfidenceThreshold.
+        :param piece_image_size:          Model input (width, height); the app's homography works on keypoints
+                                          normalized by it.
 
         """
         super().__init__(dist_sync_on_step=False)
@@ -129,6 +143,14 @@ class ChessPoseEstimationMetrics(Metric):
 
         if board_class_id is not None:
             self.stats_names += ["Board_AP", "Board_AR", "Board_Relaxed_AP", "Board_Relaxed_AR"]
+        self.piece_metrics = piece_metrics
+        self.piece_confidence_threshold = piece_confidence_threshold
+        self.piece_board_keypoint_threshold = piece_board_keypoint_threshold
+        self.piece_image_size = tuple(piece_image_size)
+        if piece_metrics:
+            if num_joints != 9:
+                raise ValueError("Piece metrics require the nine chess board reference points")
+            self.stats_names += ["Piece_AP", "Piece_AR"]
 
         self.greater_component_is_better = dict((k, True) for k in self.stats_names)
 
@@ -157,6 +179,8 @@ class ChessPoseEstimationMetrics(Metric):
         self.add_state("predictions", default=[], dist_reduce_fx=None)
         self.add_state("board_predictions", default=[], dist_reduce_fx=None)
         self.add_state("board_relaxed_predictions", default=[], dist_reduce_fx=None)
+        self.add_state("piece_predictions", default=[], dist_reduce_fx=None)
+        self.add_state("piece_confusions", default=[], dist_reduce_fx=None)
 
     @torch.no_grad()
     def update(
@@ -198,12 +222,46 @@ class ChessPoseEstimationMetrics(Metric):
         :param gt_samples:  List of ground-truth samples
 
         """
+        if self.piece_metrics:
+            if gt_samples is None:
+                raise ValueError("Piece metrics need ground truth passed as gt_samples")
+            self._update_pieces(preds, gt_samples)
         predictions: List[ChessPoseEstimationPredictions] = self.post_prediction_callback(preds)  # Decode raw predictions into poses
 
         if gt_samples is not None:
             self._update_with_samples(predictions, gt_samples)
         else:
             self._update_with_old_style_args(predictions, gt_joints, gt_bboxes, gt_areas)
+
+    def _update_pieces(self, preds: Any, gt_samples: List[PoseEstimationSample]) -> None:
+        """Read each image as the app would, straight from the raw outputs, and score it against its annotation.
+
+        Images whose annotation has no usable board cannot place their pieces, so they are left out.
+        """
+        _, class_scores, pose_coords, pose_scores = (x.detach().float().cpu().numpy() for x in preds[0])
+        for i, sample in enumerate(gt_samples):
+            truth = annotated_squares(np.asarray(sample.joints), np.asarray(sample.labels).reshape(-1), self.piece_image_size)
+            if truth is None:
+                continue
+            readings = app_square_readings(
+                class_scores[i],
+                pose_coords[i],
+                pose_scores[i],
+                self.piece_image_size,
+                confidence_threshold=self.piece_confidence_threshold,
+                board_keypoint_threshold=self.piece_board_keypoint_threshold,
+            )
+            per_class, confusion = match_squares(readings, truth)
+            for cls, (matched, scores, targets) in per_class.items():
+                matched = torch.from_numpy(matched).view(-1, 1)
+                self.piece_predictions.append((cls, matched, torch.zeros_like(matched), torch.from_numpy(scores), targets))
+            self.piece_confusions.append(confusion)
+
+    def piece_confusion_matrix(self) -> np.ndarray:
+        """Summed 13x13 confusion over the evaluated images: rows annotated, columns read; index 12 is an empty square."""
+        if not self.piece_confusions:
+            return np.zeros((13, 13), dtype=np.int64)
+        return np.sum(self.piece_confusions, axis=0)
 
     def _update_with_samples(self, predictions: List[ChessPoseEstimationPredictions], gt_samples: List[PoseEstimationSample]) -> None:
         """
@@ -410,7 +468,7 @@ class ChessPoseEstimationMetrics(Metric):
             self.rank = get_local_rank() if self.is_distributed else -1
 
         if self.is_distributed:
-            for state_name in ("predictions", "board_predictions", "board_relaxed_predictions"):
+            for state_name in ("predictions", "board_predictions", "board_relaxed_predictions", "piece_predictions", "piece_confusions"):
                 gathered_state_dicts = [None] * self.world_size
                 torch.distributed.all_gather_object(gathered_state_dicts, getattr(self, state_name))
                 setattr(self, state_name, list(itertools.chain(*gathered_state_dicts)))
@@ -492,5 +550,10 @@ class ChessPoseEstimationMetrics(Metric):
             relaxed_precision, relaxed_recall, _ = self._aggregate(self.board_relaxed_predictions, num_thresholds=1)
             metrics["Board_Relaxed_AP"] = summarize(relaxed_precision)
             metrics["Board_Relaxed_AR"] = summarize(relaxed_recall)
+
+        if self.piece_metrics:
+            piece_precision, piece_recall, _ = self._aggregate(self.piece_predictions, num_thresholds=1)
+            metrics["Piece_AP"] = summarize(piece_precision)
+            metrics["Piece_AR"] = summarize(piece_recall)
 
         return metrics
