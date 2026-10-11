@@ -439,6 +439,12 @@ class KeypointsBottomRightPadding(_KeypointsPadding):
         return _get_bottom_right_padding_coordinates(input_shape=input_shape, output_shape=self.output_shape)
 
 
+@register_processing(Processings.KeypointsCenterPadding)
+class KeypointsCenterPadding(_KeypointsPadding):
+    def _get_padding_params(self, input_shape: Tuple[int, int]) -> PaddingCoordinates:
+        return _get_center_padding_coordinates(input_shape=input_shape, output_shape=self.output_shape)
+
+
 @register_processing()
 class DetectionAutoPadding(AutoPadding):
     def preprocess_image(self, image: np.ndarray) -> Tuple[np.ndarray, DetectionPadToSizeMetadata]:

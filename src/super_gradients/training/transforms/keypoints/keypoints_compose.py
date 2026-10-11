@@ -11,7 +11,7 @@ class KeypointsCompose(AbstractKeypointTransform):
     Composes several transforms together
     """
 
-    def __init__(self, transforms: List[AbstractKeypointTransform], load_sample_fn=None):
+    def __init__(self, transforms: List[AbstractKeypointTransform], load_sample_fn=None, preserve_out_of_frame_board_annotations=False):
         """
 
         :param transforms:         List of keypoint-based transformations
@@ -25,6 +25,7 @@ class KeypointsCompose(AbstractKeypointTransform):
         super().__init__()
         self.transforms = transforms
         self.load_sample_fn = load_sample_fn
+        self.preserve_out_of_frame_board_annotations = preserve_out_of_frame_board_annotations
 
     def __call__(
         self, image: np.ndarray, mask: np.ndarray, joints: np.ndarray, areas: Optional[np.ndarray], bboxes: Optional[np.ndarray]
@@ -50,8 +51,19 @@ class KeypointsCompose(AbstractKeypointTransform):
         :param sample: Input sample
         :return:       Transformed sample.
         """
+        # New chess recipes may infer annotated board geometry in padding. Preserve only
+        # known, finite board labels through the initial source-image boundary check.
+        board_flags = None
+        if self.preserve_out_of_frame_board_annotations and sample.labels is not None:
+            boards = np.asarray(sample.labels).reshape(-1) == 12
+            board_flags = sample.joints[boards, :, 2].copy()
+            board_flags[~np.isfinite(sample.joints[boards, :, :2]).all(axis=-1)] = 0
         sample = sample.sanitize_sample()
+        if board_flags is not None:
+            sample.joints[boards, :, 2] = board_flags
         sample = self._apply_transforms(sample, transforms=self.transforms, load_sample_fn=self.load_sample_fn)
+        if self.preserve_out_of_frame_board_annotations:
+            sample = sample.sanitize_sample()
         return sample
 
     @classmethod

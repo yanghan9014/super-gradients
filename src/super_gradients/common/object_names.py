@@ -453,6 +453,7 @@ class Processings:
     KeypointsRescale = "KeypointsRescale"
     KeypointsLongestMaxSizeRescale = "KeypointsLongestMaxSizeRescale"
     KeypointsBottomRightPadding = "KeypointsBottomRightPadding"
+    KeypointsCenterPadding = "KeypointsCenterPadding"
     ImagePermute = "ImagePermute"
     ReverseImageChannels = "ReverseImageChannels"
     NormalizeImage = "NormalizeImage"

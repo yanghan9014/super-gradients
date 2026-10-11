@@ -52,6 +52,7 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         keypoint_colors: Union[List[Tuple[int, int, int]], np.ndarray, None],
         remove_duplicate_annotations: bool = False,
         crowd_annotations_action: CrowdAnnotationActionEnum = CrowdAnnotationActionEnum.NO_ACTION,
+        preserve_out_of_frame_board_annotations: bool = False,
     ):
         """
 
@@ -98,6 +99,7 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         )
         self.non_empty_annotation_indexes = np.argwhere([len(ann.ann_keypoints) > 0 for ann in self.annotations]).flatten()
         self.include_empty_samples = include_empty_samples
+        self.transforms.preserve_out_of_frame_board_annotations = preserve_out_of_frame_board_annotations
 
     def __len__(self):
         if self.include_empty_samples:

@@ -18,6 +18,7 @@ train_dataset_params:
   keypoint_colors: ${dataset_params.keypoint_colors}
 
   include_empty_samples: True
+  preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: mask_as_normal
 
   transforms:
@@ -33,11 +34,26 @@ train_dataset_params:
         vgain: 20
         prob: 1.0
 
+    # Appearance precedes geometry so newly added padding remains black.
+    - KeypointsImageOnlyAugmentation:
+        transforms:
+          - GaussianBlur:
+              blur_limit: [3, 7]
+              p: 0.2
+          - GaussNoise:
+              var_limit: [10.0, 50.0]
+              p: 0.2
+          - ImageCompression:
+              quality_lower: 50
+              quality_upper: 95
+              p: 0.2
+
     # Frame the board in a 4:3 window like the app's camera crop, at a random size and position.
     - KeypointsBoardFramedCrop:
         output_height: ${dataset_params.image_height}
         output_width: ${dataset_params.image_width}
         randomize: True
+        preserve_out_of_frame_board_annotations: True
         max_board_fraction: 0.85
         min_board_fraction: 0.5
         image_pad_value: [0, 0, 0]
@@ -54,34 +70,6 @@ train_dataset_params:
         max_attempts: 20
         image_pad_value: [0, 0, 0]
         mask_pad_value: 1
-
-    # Pixel-sized effects operate at the final resolution (e.g. a dropout hole is at most 96 px).
-    - Albumentations:
-        Compose:
-          transforms:
-            - GaussianBlur:
-                blur_limit: [3, 7]
-                p: 0.2
-            - GaussNoise:
-                var_limit: [10.0, 50.0]
-                p: 0.2
-            - ImageCompression:
-                quality_lower: 50
-                quality_upper: 95
-                p: 0.2
-            - CoarseDropout:
-                max_holes: 3
-                max_height: 96
-                max_width: 96
-                fill_value: 0
-                p: 0.5
-          keypoint_params: 
-          bbox_params:
-            min_area: 0.0
-            min_visibility: 0.0
-            min_width: 0.0
-            min_height: 0.0
-            check_each_transform: False
 
     - KeypointsImageStandardize:
         max_value: 255
@@ -101,15 +89,14 @@ val_dataset_params:
   keypoint_colors: ${dataset_params.keypoint_colors}
 
   include_empty_samples: True
+  preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: no_action
 
   transforms:
-    # The same framing, deterministic: centred on the board.
-    - KeypointsBoardFramedCrop:
+    # Preserve the entire photo; center with black padding on only one axis.
+    - KeypointsLetterbox:
         output_height: ${dataset_params.image_height}
         output_width: ${dataset_params.image_width}
-        randomize: False
-        max_board_fraction: 0.85
         image_pad_value: [0, 0, 0]
         mask_pad_value: 1
 

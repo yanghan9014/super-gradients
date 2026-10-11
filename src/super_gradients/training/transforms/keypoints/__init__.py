@@ -10,6 +10,8 @@ from .keypoints_mosaic import KeypointsMosaic
 from .keypoints_pad_if_needed import KeypointsPadIfNeeded
 from .keypoints_board_framed_crop import KeypointsBoardFramedCrop
 from .keypoints_board_safe_geometry import KeypointsBoardSafeGeometry
+from .keypoints_letterbox import KeypointsLetterbox
+from .keypoints_image_only_augmentation import KeypointsImageOnlyAugmentation
 from .keypoints_random_affine import KeypointsRandomAffineTransform
 from .keypoints_random_perspective import KeypointsRandomPerspectiveTransform
 from .keypoints_random_horisontal_flip import KeypointsRandomHorizontalFlip
@@ -34,6 +36,8 @@ __all__ = [
     "KeypointsPadIfNeeded",
     "KeypointsBoardFramedCrop",
     "KeypointsBoardSafeGeometry",
+    "KeypointsLetterbox",
+    "KeypointsImageOnlyAugmentation",
     "KeypointsRandomAffineTransform",
     "KeypointsRandomPerspectiveTransform",
     "KeypointsRandomHorizontalFlip",

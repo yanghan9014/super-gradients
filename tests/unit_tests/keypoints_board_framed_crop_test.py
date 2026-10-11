@@ -8,7 +8,7 @@ import pytest
 from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.transforms.keypoints import KeypointsBoardFramedCrop
 
-GREY = 127
+BLACK = 0
 
 
 def sample(width, height, board_box, pieces=()):
@@ -45,7 +45,7 @@ def assert_board_inside_with_margin(result, fraction=0.85):
 
 
 def has_padding(result):
-    return (result.image == GREY).any()
+    return (result.image == BLACK).any()
 
 
 def test_board_that_fits_gets_the_full_height_window_with_no_padding():
@@ -129,4 +129,4 @@ def test_outputs_are_float32_whatever_the_dataset_loaded():
 
 def test_inference_equivalent_is_resize_and_pad_to_the_output_size():
     steps = KeypointsBoardFramedCrop().get_equivalent_preprocessing()
-    assert [next(iter(s)) for s in steps] == ["KeypointsLongestMaxSizeRescale", "KeypointsBottomRightPadding"]
+    assert [next(iter(s)) for s in steps] == ["KeypointsLongestMaxSizeRescale", "KeypointsCenterPadding"]

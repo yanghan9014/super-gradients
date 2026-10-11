@@ -35,9 +35,10 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         max_board_fraction: float = 0.85,
         min_board_fraction: float = 0.5,
         randomize: bool = False,
-        image_pad_value: Union[int, Iterable[int]] = 127,
+        image_pad_value: Union[int, Iterable[int]] = 0,
         mask_pad_value: float = 1,
         interpolation: int = cv2.INTER_LINEAR,
+        preserve_out_of_frame_board_annotations: bool = False,
     ):
         super().__init__()
         if not 0 < min_board_fraction <= max_board_fraction <= 1:
@@ -51,13 +52,18 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         self.image_pad_value = image_pad_value
         self.mask_pad_value = mask_pad_value
         self.interpolation = interpolation
+        self.preserve_out_of_frame_board_annotations = preserve_out_of_frame_board_annotations
 
     def board_extent(self, sample: PoseEstimationSample):
         """(x0, y0, x1, y1) of the visible board landmarks, clipped to the image; None without a board."""
         height, width = sample.image.shape[:2]
         if sample.labels is None:
             return None
-        points = [joints[joints[:, 2] > 0, :2] for joints, label in zip(sample.joints, sample.labels) if label == self.board_class_id]
+        points = [
+            joints[(joints[:, 2] > 0) & (joints[:, :2] >= 0).all(axis=1) & (joints[:, :2] < [width, height]).all(axis=1), :2]
+            for joints, label in zip(sample.joints, sample.labels)
+            if label == self.board_class_id
+        ]
         points = np.concatenate(points) if points else np.zeros((0, 2))
         if len(points) == 0:
             return None
@@ -123,6 +129,10 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         joints[:, :, 0] = (joints[:, :, 0] - left) * scale
         joints[:, :, 1] = (joints[:, :, 1] - top) * scale
         outside = (joints[:, :, 0] < 0) | (joints[:, :, 1] < 0) | (joints[:, :, 0] >= self.output_width) | (joints[:, :, 1] >= self.output_height)
+        if self.preserve_out_of_frame_board_annotations and sample.labels is not None:
+            # Geometry can bring known board points into the final canvas. It performs
+            # the final boundary check; piece annotations still require source evidence.
+            outside &= (np.asarray(sample.labels).reshape(-1) != self.board_class_id)[:, None]
         joints[outside, 2] = 0
         sample.joints = joints
         if sample.bboxes_xywh is not None:
@@ -145,5 +155,5 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         pad = list(self.image_pad_value) if isinstance(self.image_pad_value, Iterable) else [self.image_pad_value] * 3
         return [
             {Processings.KeypointsLongestMaxSizeRescale: {"output_shape": shape}},
-            {Processings.KeypointsBottomRightPadding: {"output_shape": shape, "pad_value": pad}},
+            {Processings.KeypointsCenterPadding: {"output_shape": shape, "pad_value": pad}},
         ]
