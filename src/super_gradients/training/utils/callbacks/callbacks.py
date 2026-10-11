@@ -771,8 +771,11 @@ class ChessPieceConfusionCallback(PhaseCallback):
     def __call__(self, context: PhaseContext):
         from super_gradients.training.metrics.chess_piece_metrics import EMPTY, PIECE_NAMES, confusion_figure
 
-        metrics = context.metrics_compute_fn
-        candidates = metrics.values() if isinstance(metrics, MetricCollection) else [metrics]
+        # At validation end the trainer's context carries the validation metrics in valid_metrics;
+        # its metrics_compute_fn still holds the training metrics.
+        candidates = []
+        for metrics in (context.valid_metrics, context.metrics_compute_fn):
+            candidates += list(metrics.values()) if isinstance(metrics, MetricCollection) else [metrics]
         metric = next((m for m in candidates if getattr(m, "piece_metrics", False)), None)
         if metric is None or context.sg_logger is None:
             return

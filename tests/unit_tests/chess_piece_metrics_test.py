@@ -137,3 +137,19 @@ def test_logging_names_survive_lowercasing():
 
     assert len({name.lower() for name in PIECE_NAMES}) == len(PIECE_SYMBOLS) == 12
     assert PIECE_NAMES[PIECE_SYMBOLS.index("b")] == "black_bishop"
+
+
+def test_callback_reads_validation_metrics_from_the_trainer_context():
+    from torchmetrics import MetricCollection
+
+    from super_gradients.training.utils.callbacks import ChessPieceConfusionCallback
+    from super_gradients.training.utils.callbacks.base_callbacks import PhaseContext
+
+    metric = make_metric()
+    update(metric, raw_outputs(pieces=[(3, 0.9, "e4")]), [(3, "e4"), (4, "d1")])
+    logged = []
+    logger = SimpleNamespace(add_figure=lambda tag, figure, global_step: logged.append(tag), add_scalar=lambda tag, value, global_step: logged.append(tag))
+    # As in Trainer.train: metrics_compute_fn is the (empty) training collection at validation end.
+    context = PhaseContext(epoch=9, metrics_compute_fn=MetricCollection([]), valid_metrics=MetricCollection([metric]), sg_logger=logger)
+    ChessPieceConfusionCallback()(context)
+    assert "Valid_Piece_Confusion" in logged and "Valid_Piece_FN/white_queen" in logged
