@@ -96,6 +96,10 @@ class KeypointsRandomPerspectiveTransform(AbstractKeypointTransform):
         matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
         return matrix, src_pts, dst_pts
 
+    def _get_sample_matrix(self, sample, distortion_scales):
+        """Hook for transforms that constrain geometry using the sample annotations."""
+        return self._get_perspective_matrix(sample.image, distortion_scales)
+
     def apply_to_sample(self, sample: PoseEstimationSample) -> PoseEstimationSample:
         """
         Apply perspective transform to given pose estimation sample.
@@ -120,7 +124,7 @@ class KeypointsRandomPerspectiveTransform(AbstractKeypointTransform):
             else:
                 raise ValueError(f"Invalid distortion_scale format: {self.distortion_scale}")
 
-            M, src_pts, dst_pts = self._get_perspective_matrix(sample.image, scales)
+            M, src_pts, dst_pts = self._get_sample_matrix(sample, scales)
             interpolation = random.choice(self.interpolation_mode)
 
             image_pad_value = (
