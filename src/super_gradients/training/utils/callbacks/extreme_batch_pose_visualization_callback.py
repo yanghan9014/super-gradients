@@ -258,5 +258,6 @@ class ExtremeBatchPoseEstimationVisualizationCallback(ExtremeBatchCaseVisualizat
         )
         images_to_save_gt = np.stack(images_to_save_gt)
 
-        # Stack the predictions and GT images together
-        return np.concatenate([images_to_save_gt, images_to_save_preds], axis=2)
+        # Stack the predictions and GT images together. Drawing happened in OpenCV's BGR order
+        # (universal_undo_preprocessing_fn flips the model's RGB input); TensorBoard expects RGB.
+        return np.ascontiguousarray(np.concatenate([images_to_save_gt, images_to_save_preds], axis=2)[..., ::-1])
