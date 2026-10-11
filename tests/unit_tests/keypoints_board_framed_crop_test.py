@@ -118,3 +118,15 @@ def test_image_without_a_board_gets_the_app_centre_crop():
     result = KeypointsBoardFramedCrop().apply_to_sample(s)
     assert not has_padding(result)
     assert result.joints[0, 0, 0] == pytest.approx(320, abs=0.5) and result.joints[0, 0, 1] == pytest.approx(240, abs=0.5)
+
+
+def test_outputs_are_float32_whatever_the_dataset_loaded():
+    s = sample(1920, 1080, (700, 300, 1300, 800))
+    s.joints, s.bboxes_xywh, s.areas = s.joints.astype(np.float64), s.bboxes_xywh.astype(np.float64), s.areas.astype(np.float64)
+    result = KeypointsBoardFramedCrop(randomize=True).apply_to_sample(s)
+    assert result.joints.dtype == result.bboxes_xywh.dtype == result.areas.dtype == np.float32
+
+
+def test_inference_equivalent_is_resize_and_pad_to_the_output_size():
+    steps = KeypointsBoardFramedCrop().get_equivalent_preprocessing()
+    assert [next(iter(s)) for s in steps] == ["KeypointsLongestMaxSizeRescale", "KeypointsBottomRightPadding"]

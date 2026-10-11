@@ -1,9 +1,10 @@
 import random
-from typing import Iterable, Tuple, Union
+from typing import Iterable, List, Tuple, Union
 
 import cv2
 import numpy as np
 
+from super_gradients.common.object_names import Processings
 from super_gradients.common.registry.registry import register_transform
 from super_gradients.training.samples import PoseEstimationSample
 from .abstract_keypoints_transform import AbstractKeypointTransform
@@ -117,14 +118,15 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
             sample.mask.astype(np.uint8), matrix, size, flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=self.mask_pad_value
         ).astype(dtype)
 
-        joints = sample.joints.copy()
+        # float32 like KeypointsLongestMaxSize, which this replaces; the loss writes these into float32 tensors.
+        joints = sample.joints.astype(np.float32, copy=True)
         joints[:, :, 0] = (joints[:, :, 0] - left) * scale
         joints[:, :, 1] = (joints[:, :, 1] - top) * scale
         outside = (joints[:, :, 0] < 0) | (joints[:, :, 1] < 0) | (joints[:, :, 0] >= self.output_width) | (joints[:, :, 1] >= self.output_height)
         joints[outside, 2] = 0
         sample.joints = joints
         if sample.bboxes_xywh is not None:
-            boxes = sample.bboxes_xywh.copy()
+            boxes = sample.bboxes_xywh.astype(np.float32, copy=True)
             boxes[:, 0] = (boxes[:, 0] - left) * scale
             boxes[:, 1] = (boxes[:, 1] - top) * scale
             boxes[:, 2:4] *= scale
@@ -133,5 +135,15 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
             sample.areas = np.multiply(sample.areas, scale**2, dtype=np.float32)
         return sample
 
-    def get_equivalent_preprocessing(self):
-        raise RuntimeError("KeypointsBoardFramedCrop needs annotations; inference frames come pre-cropped from the app's camera.")
+    def get_equivalent_preprocessing(self) -> List:
+        """Inference has no annotations to frame by; app frames already arrive as the 640x480 crop.
+
+        For such a frame this transform is the identity, as is resizing to fit and padding, which
+        also keeps any other input the right size.
+        """
+        shape = (self.output_height, self.output_width)
+        pad = list(self.image_pad_value) if isinstance(self.image_pad_value, Iterable) else [self.image_pad_value] * 3
+        return [
+            {Processings.KeypointsLongestMaxSizeRescale: {"output_shape": shape}},
+            {Processings.KeypointsBottomRightPadding: {"output_shape": shape, "pad_value": pad}},
+        ]
