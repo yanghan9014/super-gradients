@@ -13,7 +13,16 @@ from super_gradients.common.registry.registry import register_metric
 from super_gradients.module_interfaces import AbstractPoseEstimationPostPredictionCallback
 from super_gradients.module_interfaces.pose_estimation_post_prediction_callback import ChessPoseEstimationPredictions
 from super_gradients.training.metrics.board_homography_metrics import compute_board_homography_matching
-from super_gradients.training.metrics.chess_piece_metrics import annotated_squares, app_square_readings, match_squares
+from super_gradients.training.metrics.chess_piece_metrics import (
+    PIECE_NAMES,
+    annotated_board_homography,
+    annotated_squares,
+    app_square_readings,
+    match_squares,
+    piece_average_precision,
+    square_readings,
+    tune_piece_threshold,
+)
 from super_gradients.training.metrics.pose_estimation_utils import compute_img_keypoint_matching, compute_visible_bbox_xywh
 from super_gradients.training.samples import PoseEstimationSample
 from super_gradients.training.utils import convert_to_tensor
@@ -94,12 +103,17 @@ class ChessPoseEstimationMetrics(Metric):
                                           Defaults to 0.7, matching ChessVision inference. Missing annotation reference
                                           points are reconstructed from the annotation homography. Invalid homographies
                                           never match; unevaluable annotations remain in the board recall denominator.
-        :param piece_metrics:             Enables Piece_AP/Piece_AR and a piece confusion matrix, computed from the raw
-                                          model output the way the iOS app reads a frame (see chess_piece_metrics): no NMS,
-                                          the most confident board, its homography, the most confident piece per square.
-                                          A reading is correct when its square holds an annotated piece of the same class.
-                                          Independent of post_prediction_callback; overall AP/AR are unchanged.
-        :param piece_confidence_threshold: The app's AppConfig.confidenceThreshold, for pieces and boards alike.
+        :param piece_metrics:             Enables Piece_mAP, 12 Piece_AP/<class> values, Piece_Color_Accuracy, and
+                                          Piece_EndToEnd_Incorrect_Squares / Piece_EndToEnd_Threshold. AP/color use
+                                          annotated board geometry, no confidence cutoff, and one winner per square.
+                                          AP requires exact class + square and averages represented classes equally
+                                          (-1 for classes with no targets). Color accuracy is pooled over occupied GT
+                                          squares with a reading, ignoring type (-1 when none). End-to-end uses the
+                                          predicted board, tuning only the piece threshold on validation square errors.
+                                          Confusion/FP/FN retain the fixed app cutoff and predicted geometry.
+                                          All use raw outputs, no NMS; overall and Board_* AP/AR are unchanged.
+        :param piece_confidence_threshold: Fixed board cutoff for end-to-end; fixed board AND piece cutoff for
+                                          confusion/FP/FN diagnostics. Not applied to recognition AP/color.
         :param piece_board_keypoint_threshold: The app's AppConfig.boardKeypointConfidenceThreshold.
         :param piece_image_size:          Model input (width, height); the app's homography works on keypoints
                                           normalized by it.
@@ -150,9 +164,14 @@ class ChessPoseEstimationMetrics(Metric):
         if piece_metrics:
             if num_joints != 9:
                 raise ValueError("Piece metrics require the nine chess board reference points")
-            self.stats_names += ["Piece_AP", "Piece_AR"]
+            self.stats_names += ["Piece_mAP", "Piece_Color_Accuracy", "Piece_EndToEnd_Incorrect_Squares", "Piece_EndToEnd_Threshold"]
+            self.stats_names += [f"Piece_AP/{name}" for name in PIECE_NAMES]
 
         self.greater_component_is_better = dict((k, True) for k in self.stats_names)
+        if piece_metrics:
+            self.greater_component_is_better["Piece_EndToEnd_Incorrect_Squares"] = False
+            # This is operating-point metadata, not a model-quality objective.
+            self.greater_component_is_better["Piece_EndToEnd_Threshold"] = False
 
         if oks_sigmas is None:
             if num_joints == 17:
@@ -181,6 +200,8 @@ class ChessPoseEstimationMetrics(Metric):
         self.add_state("board_relaxed_predictions", default=[], dist_reduce_fx=None)
         self.add_state("piece_predictions", default=[], dist_reduce_fx=None)
         self.add_state("piece_confusions", default=[], dist_reduce_fx=None)
+        self.add_state("piece_color_counts", default=[], dist_reduce_fx=None)
+        self.add_state("piece_end_to_end_frames", default=[], dist_reduce_fx=None)
 
     @torch.no_grad()
     def update(
@@ -234,27 +255,37 @@ class ChessPoseEstimationMetrics(Metric):
             self._update_with_old_style_args(predictions, gt_joints, gt_bboxes, gt_areas)
 
     def _update_pieces(self, preds: Any, gt_samples: List[PoseEstimationSample]) -> None:
-        """Read each image as the app would, straight from the raw outputs, and score it against its annotation.
+        """Evaluate recognition in GT geometry and cache app square winners for threshold tuning.
 
         Images whose annotation has no usable board cannot place their pieces, so they are left out.
         """
-        _, class_scores, pose_coords, pose_scores = (x.detach().float().cpu().numpy() for x in preds[0])
+        class_scores, pose_coords, pose_scores = (x.detach().float().cpu().numpy() for x in preds[0][1:])
         for i, sample in enumerate(gt_samples):
-            truth = annotated_squares(np.asarray(sample.joints), np.asarray(sample.labels).reshape(-1), self.piece_image_size)
-            if truth is None:
+            joints, labels = np.asarray(sample.joints), np.asarray(sample.labels).reshape(-1)
+            homography = annotated_board_homography(joints, labels, self.piece_image_size)
+            if homography is None:
                 continue
-            readings = app_square_readings(
+            truth = annotated_squares(joints, labels, self.piece_image_size, homography=homography)
+            readings = square_readings(class_scores[i], pose_coords[i], homography, self.piece_image_size)
+            per_class, _ = match_squares(readings, truth)
+            for cls, (matched, scores, targets) in per_class.items():
+                matched = torch.from_numpy(matched).view(-1, 1)
+                self.piece_predictions.append((cls, matched, torch.zeros_like(matched), torch.from_numpy(scores), targets))
+            occupied = truth.keys() & readings.keys()
+            self.piece_color_counts.append((sum(truth[s] // 6 == readings[s][0] // 6 for s in occupied), len(occupied)))
+
+            app_readings = app_square_readings(
                 class_scores[i],
                 pose_coords[i],
                 pose_scores[i],
                 self.piece_image_size,
                 confidence_threshold=self.piece_confidence_threshold,
                 board_keypoint_threshold=self.piece_board_keypoint_threshold,
+                piece_confidence_threshold=0.0,
             )
-            per_class, confusion = match_squares(readings, truth)
-            for cls, (matched, scores, targets) in per_class.items():
-                matched = torch.from_numpy(matched).view(-1, 1)
-                self.piece_predictions.append((cls, matched, torch.zeros_like(matched), torch.from_numpy(scores), targets))
+            self.piece_end_to_end_frames.append((app_readings, truth))
+            fixed_readings = {s: reading for s, reading in app_readings.items() if reading[1] >= self.piece_confidence_threshold}
+            _, confusion = match_squares(fixed_readings, truth)
             self.piece_confusions.append(confusion)
 
     def piece_confusion_matrix(self) -> np.ndarray:
@@ -468,7 +499,15 @@ class ChessPoseEstimationMetrics(Metric):
             self.rank = get_local_rank() if self.is_distributed else -1
 
         if self.is_distributed:
-            for state_name in ("predictions", "board_predictions", "board_relaxed_predictions", "piece_predictions", "piece_confusions"):
+            for state_name in (
+                "predictions",
+                "board_predictions",
+                "board_relaxed_predictions",
+                "piece_predictions",
+                "piece_confusions",
+                "piece_color_counts",
+                "piece_end_to_end_frames",
+            ):
                 gathered_state_dicts = [None] * self.world_size
                 torch.distributed.all_gather_object(gathered_state_dicts, getattr(self, state_name))
                 setattr(self, state_name, list(itertools.chain(*gathered_state_dicts)))
@@ -552,8 +591,20 @@ class ChessPoseEstimationMetrics(Metric):
             metrics["Board_Relaxed_AR"] = summarize(relaxed_recall)
 
         if self.piece_metrics:
-            piece_precision, piece_recall, _ = self._aggregate(self.piece_predictions, num_thresholds=1)
-            metrics["Piece_AP"] = summarize(piece_precision)
-            metrics["Piece_AR"] = summarize(piece_recall)
+            aps = []
+            for cls, name in enumerate(PIECE_NAMES):
+                entries = [entry for entry in self.piece_predictions if entry[0] == cls]
+                matched = np.concatenate([entry[1].cpu().numpy().reshape(-1) for entry in entries]) if entries else np.zeros(0, dtype=bool)
+                scores = np.concatenate([entry[3].cpu().numpy() for entry in entries]) if entries else np.zeros(0)
+                ap = piece_average_precision(matched, scores, sum(entry[4] for entry in entries), self.recall_thresholds.cpu().numpy())
+                metrics[f"Piece_AP/{name}"] = ap
+                aps.append(ap)
+            metrics["Piece_mAP"] = summarize(np.asarray(aps))
+            color_total = sum(total for _, total in self.piece_color_counts)
+            metrics["Piece_Color_Accuracy"] = sum(correct for correct, _ in self.piece_color_counts) / color_total if color_total else -1.0
+            errors, threshold = tune_piece_threshold(self.piece_end_to_end_frames)
+            metrics["Piece_EndToEnd_Incorrect_Squares"] = errors
+            metrics["Piece_EndToEnd_Threshold"] = threshold
 
-        return metrics
+        # Trainer zips computed values with component_names; insertion order must agree.
+        return {name: metrics[name] for name in self.component_names}

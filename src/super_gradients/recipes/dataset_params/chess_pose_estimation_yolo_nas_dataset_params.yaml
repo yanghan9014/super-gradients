@@ -35,18 +35,19 @@ train_dataset_params:
         prob: 1.0
 
     # Appearance precedes geometry so newly added padding remains black.
-    - KeypointsImageOnlyAugmentation:
-        transforms:
-          - GaussianBlur:
-              blur_limit: [3, 7]
-              p: 0.2
-          - GaussNoise:
-              var_limit: [10.0, 50.0]
-              p: 0.2
-          - ImageCompression:
-              quality_lower: 50
-              quality_upper: 95
-              p: 0.2
+    # Disabled for the next appearance-augmentation experiment.
+    # - KeypointsImageOnlyAugmentation:
+    #     transforms:
+    #       - GaussianBlur:
+    #           blur_limit: [3, 7]
+    #           p: 0.2
+    #       - GaussNoise:
+    #           var_limit: [10.0, 50.0]
+    #           p: 0.2
+    #       - ImageCompression:
+    #           quality_lower: 50
+    #           quality_upper: 95
+    #           p: 0.2
 
     # Frame the board in a 4:3 window like the app's camera crop, at a random size and position.
     - KeypointsBoardFramedCrop:

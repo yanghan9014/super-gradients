@@ -1,12 +1,11 @@
-"""Piece metrics computed the way the iOS app reads a single frame.
+"""Single-frame piece evaluation without NMS.
 
-This mirrors ChessVision_app (`YoloRunner.swift` decode, `PostProcessor.extractBoardState`):
-no NMS, one decoupled confidence threshold for pieces and boards, the most confident board,
-a homography from its landmarks that clear the keypoint threshold, then the most confident
-piece on each square. The annotation is the ground truth: its pieces are placed on squares
-with a homography fitted the same way to the annotated landmarks.
+Recognition AP/color use annotated board geometry and no confidence cutoff. App diagnostics
+use predicted geometry and the configured cutoff. End-to-end evaluation fixes board settings
+and tunes only the piece cutoff from cached square winners (no additional model inference).
 """
 
+from itertools import groupby
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -85,6 +84,7 @@ def app_square_readings(
     image_size: Tuple[int, int],
     confidence_threshold: float = 0.05,
     board_keypoint_threshold: float = 0.2,
+    piece_confidence_threshold: Optional[float] = None,
 ) -> Dict[int, Tuple[int, float]]:
     """One frame as the app reads it: {square: (piece class, confidence)}.
 
@@ -100,6 +100,20 @@ def app_square_readings(
     homography = _board_homography(pose_coords[best], pose_scores[best] >= board_keypoint_threshold, image_size)
     if homography is None:
         return {}
+    return square_readings(
+        class_scores,
+        pose_coords,
+        homography,
+        image_size,
+        confidence_threshold if piece_confidence_threshold is None else piece_confidence_threshold,
+    )
+
+
+def square_readings(class_scores, pose_coords, homography, image_size, confidence_threshold=0.0):
+    """Highest-scoring piece per square in the supplied geometry; no class-aware matching.
+
+    A zero cutoff keeps even zero-score candidates. No candidates on a square means no reading.
+    """
     piece_scores = class_scores[:, :NUM_PIECE_CLASSES]
     piece_class = piece_scores.argmax(axis=1)
     piece_conf = piece_scores.max(axis=1)
@@ -115,19 +129,24 @@ def app_square_readings(
     return readings
 
 
-def annotated_squares(joints: np.ndarray, labels: np.ndarray, image_size: Tuple[int, int]) -> Optional[Dict[int, int]]:
-    """{square: piece class} from an annotation, or None when it has no usable board.
-
-    The first annotated board with at least four visible landmarks defines the homography.
-    """
+def annotated_board_homography(joints, labels, image_size):
+    """First annotated board with at least four usable landmarks, or None."""
     for board in np.flatnonzero(labels == BOARD_CLASS_ID):
         homography = _board_homography(joints[board, :, :2], joints[board, :, 2] > 0, image_size)
-        if homography is None:
-            continue
-        pieces = [i for i in range(len(labels)) if labels[i] < NUM_PIECE_CLASSES and joints[i, 0, 2] > 0]
-        squares = _place(joints[pieces, 0, :2], homography, image_size) if pieces else []
-        return {square: int(labels[i]) for i, square in zip(pieces, squares) if square is not None}
+        if homography is not None:
+            return homography
     return None
+
+
+def annotated_squares(joints: np.ndarray, labels: np.ndarray, image_size: Tuple[int, int], homography=None) -> Optional[Dict[int, int]]:
+    """{square: piece class}, or None when the annotation has no usable board."""
+    if homography is None:
+        homography = annotated_board_homography(joints, labels, image_size)
+    if homography is None:
+        return None
+    pieces = [i for i in range(len(labels)) if labels[i] < NUM_PIECE_CLASSES and joints[i, 0, 2] > 0]
+    squares = _place(joints[pieces, 0, :2], homography, image_size) if pieces else []
+    return {square: int(labels[i]) for i, square in zip(pieces, squares) if square is not None}
 
 
 def match_squares(readings: Dict[int, Tuple[int, float]], truth: Dict[int, int]) -> Tuple[Dict[int, Tuple[np.ndarray, np.ndarray, int]], np.ndarray]:
@@ -146,9 +165,66 @@ def match_squares(readings: Dict[int, Tuple[int, float]], truth: Dict[int, int])
         if len(squares) or targets:
             per_class[cls] = (matched, scores, targets)
     confusion = np.zeros((NUM_PIECE_CLASSES + 1, NUM_PIECE_CLASSES + 1), dtype=np.int64)
-    for square in set(readings) | set(truth):
+    # Include true empty squares so the empty row measures phantom rates, not their composition.
+    for square in range(64):
         confusion[truth.get(square, EMPTY), readings[square][0] if square in readings else EMPTY] += 1
     return per_class, confusion
+
+
+def piece_average_precision(matched, scores, targets, recall_thresholds):
+    """Interpolated AP at the supplied recall levels, with equal scores accepted together.
+
+    -1 means no annotated examples of this class; exclude it from the macro average.
+    Missing pieces remain in the recall denominator. No deployment score cutoff is applied.
+    """
+    if targets == 0:
+        return -1.0
+    if len(scores) == 0:
+        return 0.0
+    order = np.argsort(-scores, kind="stable")
+    scores, matched = scores[order], matched[order]
+    ends = np.r_[np.flatnonzero(scores[1:] != scores[:-1]), len(scores) - 1]
+    tp = np.cumsum(matched)[ends]
+    recall = tp / targets
+    precision = tp / (ends + 1)
+    precision = np.maximum.accumulate(precision[::-1])[::-1]
+    indices = np.searchsorted(recall, recall_thresholds, side="left")
+    return float(np.r_[precision, 0.0][indices].mean())
+
+
+def tune_piece_threshold(frames):
+    """Return (incorrect squares/frame, threshold) for cached (readings, truth) pairs.
+
+    Optimize one global piece threshold with >= acceptance in [0, 1]. Board settings and
+    square winners are fixed. Sweep distinct scores, accepting ties together; choose the
+    highest threshold when errors tie. An extraction failure has empty readings, so every
+    annotated piece still contributes an error. No scored frames returns (-1, -1).
+    """
+    if not frames:
+        return -1.0, -1.0
+    errors = sum(len(truth) for _, truth in frames)  # All readings initially rejected.
+    events = []
+    for readings, truth in frames:
+        for square, (cls, score) in readings.items():
+            # Accepting a correct piece fixes one miss; a wrong class leaves one error;
+            # accepting a phantom adds one error.
+            delta = -1 if truth.get(square) == cls else int(square not in truth)
+            events.append((score, delta))
+    best_errors, best_threshold = float("inf"), 1.0
+    if not events or max(score for score, _ in events) < 1.0:
+        best_errors = errors  # Threshold 1 rejects every reading.
+    events.sort(reverse=True)
+    for score, group in groupby(events, key=lambda event: event[0]):
+        errors += sum(delta for _, delta in group)
+        if errors < best_errors:
+            best_errors, best_threshold = errors, score
+    return float(best_errors / len(frames)), float(best_threshold)
+
+
+def confusion_percentages(confusion):
+    """Row percentages; unrepresented rows are NaN (undefined, not perfect)."""
+    totals = confusion.sum(axis=1, keepdims=True)
+    return np.divide(100.0 * confusion, totals, out=np.full(confusion.shape, np.nan), where=totals > 0)
 
 
 def confusion_figure(confusion: np.ndarray, title: str = "Piece confusion"):
@@ -164,18 +240,19 @@ def confusion_figure(confusion: np.ndarray, title: str = "Piece confusion"):
 
     names = PIECE_SYMBOLS + ["empty"]
     totals = confusion.sum(axis=1, keepdims=True)
-    shares = np.divide(confusion, totals, out=np.zeros(confusion.shape, dtype=np.float64), where=totals > 0)
+    percentages = confusion_percentages(confusion)
+    shares = percentages / 100.0
     figure, axes = plt.subplots(figsize=(9, 8))
     axes.imshow(shares, cmap="viridis", vmin=0, vmax=1)
     for row in range(len(names)):
         for column in range(len(names)):
             if confusion[row, column]:
                 colour = "black" if shares[row, column] > 0.5 else "white"
-                axes.text(column, row, str(confusion[row, column]), ha="center", va="center", fontsize=8, color=colour)
+                axes.text(column, row, f"{confusion[row, column]}\n({percentages[row, column]:.1f}%)", ha="center", va="center", fontsize=7, color=colour)
     axes.set_xticks(range(len(names)), names)
     axes.set_yticks(range(len(names)), [f"{n} ({int(t)})" for n, t in zip(names, totals[:, 0])])
     axes.set_xlabel("Read by the app pipeline")
     axes.set_ylabel("Annotated (squares)")
-    axes.set_title(f"{title}: row share, cell = count; empty->empty not counted")
+    axes.set_title(f"{title}: count and row percentage (including empty->empty)")
     figure.tight_layout()
     return figure

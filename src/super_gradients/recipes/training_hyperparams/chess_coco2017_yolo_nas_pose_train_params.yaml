@@ -60,8 +60,10 @@ valid_metrics_list:
       # Applies only to Board_* metrics; overall AP/AR retain their original OKS matching.
       board_max_square_error: 0.25
       board_keypoint_confidence_threshold: 0.7
-      # Piece_AP/Piece_AR and the confusion matrix read the raw output the way the iOS app does
-      # (no NMS, its thresholds, its homography); post_prediction_callback below does not apply.
+      # Piece_mAP + Piece_AP/<class> and color accuracy: annotated board, no piece cutoff.
+      # End-to-end square error: predicted board, validation-tuned piece cutoff (cached sweep).
+      # Confusion + FP/FN percentages: predicted board, fixed cutoff below.
+      # All use raw output without NMS; post_prediction_callback below does not apply.
       piece_metrics: True
       piece_confidence_threshold: 0.05
       piece_board_keypoint_threshold: 0.2

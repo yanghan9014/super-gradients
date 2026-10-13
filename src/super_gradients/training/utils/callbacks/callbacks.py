@@ -761,7 +761,9 @@ class ChessPieceConfusionCallback(PhaseCallback):
 
     Reads ChessPoseEstimationMetrics(piece_metrics=True) from the validation metrics, before they
     reset for the next run. Writes a heatmap image plus per-class false positive (empty square read
-    as the piece) and false negative (annotated piece with no reading) counts as scalars.
+    as the piece) and false negative (annotated piece with no reading) percentages as scalars.
+    FP denominator: all annotated empty squares. FN denominator: all annotated pieces of
+    that class. Wrong-class substitutions remain in the matrix, not these empty/piece rates.
     """
 
     def __init__(self):
@@ -769,7 +771,7 @@ class ChessPieceConfusionCallback(PhaseCallback):
 
     @multi_process_safe
     def __call__(self, context: PhaseContext):
-        from super_gradients.training.metrics.chess_piece_metrics import EMPTY, PIECE_NAMES, confusion_figure
+        from super_gradients.training.metrics.chess_piece_metrics import EMPTY, PIECE_NAMES, confusion_figure, confusion_percentages
 
         # At validation end the trainer's context carries the validation metrics in valid_metrics;
         # its metrics_compute_fn still holds the training metrics.
@@ -782,11 +784,15 @@ class ChessPieceConfusionCallback(PhaseCallback):
         confusion = metric.piece_confusion_matrix()
         if not confusion.any():
             return
-        figure = confusion_figure(confusion, title=f"Piece confusion, epoch {context.epoch}")
+        figure = confusion_figure(confusion, title=f"Piece confusion, epoch {context.epoch}, cutoff {metric.piece_confidence_threshold:g}")
         context.sg_logger.add_figure("Valid_Piece_Confusion", figure, global_step=context.epoch)
+        percentages = confusion_percentages(confusion)
         for cls, name in enumerate(PIECE_NAMES):
-            context.sg_logger.add_scalar(f"Valid_Piece_FP/{name}", float(confusion[EMPTY, cls]), global_step=context.epoch)
-            context.sg_logger.add_scalar(f"Valid_Piece_FN/{name}", float(confusion[cls, EMPTY]), global_step=context.epoch)
+            # Skip undefined denominators instead of reporting misleading zero error.
+            if np.isfinite(percentages[EMPTY, cls]):
+                context.sg_logger.add_scalar(f"Valid_Piece_FP_Percent/{name}", float(percentages[EMPTY, cls]), global_step=context.epoch)
+            if np.isfinite(percentages[cls, EMPTY]):
+                context.sg_logger.add_scalar(f"Valid_Piece_FN_Percent/{name}", float(percentages[cls, EMPTY]), global_step=context.epoch)
 
 
 @register_callback(Callbacks.ROBOFLOW_RESULT_CALLBACK)

@@ -14,6 +14,10 @@ from super_gradients.training.metrics.chess_piece_metrics import (
     app_square_readings,
     apply_homography,
     match_squares,
+    confusion_percentages,
+    confusion_figure,
+    piece_average_precision,
+    tune_piece_threshold,
     square_name,
 )
 from super_gradients.training.metrics.chess_pose_estimation_metrics import ChessPoseEstimationMetrics
@@ -100,7 +104,8 @@ def test_matching_and_confusion():
     assert per_class[2][0].tolist() == [False] and per_class[2][2] == 0
     assert per_class[1][0].tolist() == [] and per_class[1][2] == 1
     assert confusion[3, 3] == 1 and confusion[1, 2] == 1 and confusion[EMPTY, 5] == 1 and confusion[4, EMPTY] == 1
-    assert confusion.sum() == 4
+    assert confusion.sum() == 64
+    assert confusion[EMPTY, EMPTY] == 60
 
 
 def make_metric():
@@ -118,18 +123,27 @@ def update(metric, raw, pieces):
     metric.update(preds=((torch.zeros(1, len(scores[0]), 4), scores, coords, point_scores),), target=None, gt_samples=[sample])
 
 
-def test_metric_reports_piece_ap_ar_and_keeps_confusion_until_reset():
+def test_metric_reports_macro_ap_color_and_keeps_confusion_until_reset():
     metric = make_metric()
     # Pawn found; king read as a knight; queen missed.
     update(metric, raw_outputs(pieces=[(3, 0.9, "e4"), (2, 0.7, "g1")]), [(3, "e4"), (1, "g1"), (4, "d1")])
     result = metric.compute()
-    # Pawn AP and AR are 1, king and queen are 0 (missed), the knight class has no annotations.
-    assert result["Piece_AR"] == pytest.approx(1 / 3)
-    assert result["Piece_AP"] == pytest.approx(1 / 3)
+    # Pawn AP is 1, king and queen are 0; absent classes are undefined and excluded.
+    assert result["Piece_mAP"] == pytest.approx(1 / 3)
+    assert result["Piece_AP/white_pawn"] == 1
+    assert result["Piece_AP/white_king"] == 0
+    assert result["Piece_AP/white_knight"] == -1
+    assert "Piece_AP" not in result and "Piece_AR" not in result
+    assert result["Piece_Color_Accuracy"] == 1  # Wrong type is still the correct color.
+    assert result["Piece_EndToEnd_Incorrect_Squares"] == 2
+    assert result["Piece_EndToEnd_Threshold"] == pytest.approx(0.9)
     assert {"AP", "AR", "Board_AP", "Board_AR"} <= set(result)
-    assert metric.piece_confusion_matrix().sum() == 3
+    assert list(result) == metric.component_names
+    assert not metric.greater_component_is_better["Piece_EndToEnd_Incorrect_Squares"]
+    assert metric.piece_confusion_matrix().sum() == 64
     metric.reset()
     assert metric.piece_confusion_matrix().sum() == 0
+    assert metric.piece_predictions == metric.piece_color_counts == metric.piece_end_to_end_frames == []
 
 
 def test_logging_names_survive_lowercasing():
@@ -137,6 +151,18 @@ def test_logging_names_survive_lowercasing():
 
     assert len({name.lower() for name in PIECE_NAMES}) == len(PIECE_SYMBOLS) == 12
     assert PIECE_NAMES[PIECE_SYMBOLS.index("b")] == "black_bishop"
+
+
+def test_trainer_logging_preserves_metric_names_and_values():
+    from torchmetrics import MetricCollection
+    from super_gradients.training.metrics.metric_utils import get_metrics_dict, get_metrics_results_tuple
+
+    metric = make_metric()
+    update(metric, raw_outputs(pieces=[(3, 0.8, "e4"), (9, 0.2, "g1")]), [(3, "e4"), (1, "g1")])
+    expected = metric.compute()
+    collection = MetricCollection([metric])
+    logged = get_metrics_dict(get_metrics_results_tuple(collection), collection, [])
+    assert logged == pytest.approx(expected)
 
 
 def test_callback_reads_validation_metrics_from_the_trainer_context():
@@ -147,9 +173,145 @@ def test_callback_reads_validation_metrics_from_the_trainer_context():
 
     metric = make_metric()
     update(metric, raw_outputs(pieces=[(3, 0.9, "e4")]), [(3, "e4"), (4, "d1")])
-    logged = []
-    logger = SimpleNamespace(add_figure=lambda tag, figure, global_step: logged.append(tag), add_scalar=lambda tag, value, global_step: logged.append(tag))
+    logged = {}
+    logger = SimpleNamespace(
+        add_figure=lambda tag, figure, global_step: logged.update({tag: figure}), add_scalar=lambda tag, value, global_step: logged.update({tag: value})
+    )
     # As in Trainer.train: metrics_compute_fn is the (empty) training collection at validation end.
     context = PhaseContext(epoch=9, metrics_compute_fn=MetricCollection([]), valid_metrics=MetricCollection([metric]), sg_logger=logger)
     ChessPieceConfusionCallback()(context)
-    assert "Valid_Piece_Confusion" in logged and "Valid_Piece_FN/white_queen" in logged
+    assert "Valid_Piece_Confusion" in logged
+    assert logged["Valid_Piece_FN_Percent/white_queen"] == 100
+    assert logged["Valid_Piece_FN_Percent/white_pawn"] == 0
+    assert logged["Valid_Piece_FP_Percent/white_pawn"] == 0
+    assert "Valid_Piece_FN_Percent/black_king" not in logged  # No GT black kings.
+
+
+@pytest.mark.parametrize("board_score", [0.0, 0.9])
+def test_recognition_uses_gt_board_and_no_piece_cutoff(board_score):
+    metric = make_metric()
+    raw = raw_outputs(board_score=board_score, pieces=[(3, 0.0001, "e4")])
+    raw[2][:] = 0  # Predicted board has no usable landmarks regardless of its score.
+    update(metric, raw, [(3, "e4")])
+    result = metric.compute()
+    assert result["Piece_mAP"] == 1
+    assert result["Piece_Color_Accuracy"] == 1
+    assert result["Piece_EndToEnd_Incorrect_Squares"] == 1  # Failed extraction remains a miss.
+    assert metric.piece_confusion_matrix()[3, EMPTY] == 1
+
+
+def test_color_counts_wrong_colors_but_ignores_type_and_missing_predictions():
+    metric = make_metric()
+    update(metric, raw_outputs(pieces=[(4, 0.001, "e4"), (9, 0.9, "g1")]), [(3, "e4"), (1, "g1"), (4, "d1")])
+    result = metric.compute()
+    assert result["Piece_Color_Accuracy"] == 0.5
+    assert result["Piece_mAP"] == 0
+    assert metric.piece_color_counts == [(1, 2)]
+
+
+def test_ap_penalizes_bad_ranking_and_missing_targets_and_groups_ties():
+    levels = np.linspace(0, 1, 101)
+    ap = lambda matched, scores, targets=2: piece_average_precision(np.array(matched), np.array(scores), targets, levels)
+    assert ap([True, True, False], [0.9, 0.8, 0.7]) == 1
+    assert ap([False, True, True], [0.9, 0.8, 0.7]) == pytest.approx(2 / 3)
+    assert ap([True], [0.9]) == pytest.approx(51 / 101)  # Missing target limits recall.
+    assert ap([True, False], [0.5, 0.5], 1) == 0.5
+    assert ap([False, True], [0.5, 0.5], 1) == 0.5
+    assert ap([False, True, True], [0.09, 0.08, 0.07]) == ap([False, True, True], [0.9, 0.8, 0.7])
+
+
+def test_macro_ap_weights_classes_equally_not_by_instance_count():
+    metric = make_metric()
+    update(metric, raw_outputs(pieces=[(3, 0.9, "e4"), (3, 0.8, "d4")]), [(3, "e4"), (3, "d4"), (1, "g1")])
+    assert metric.compute()["Piece_mAP"] == 0.5
+
+
+def test_end_to_end_tunes_piece_cutoff_without_changing_board_gate_or_confusion_cutoff():
+    metric = make_metric()
+    update(metric, raw_outputs(board_score=0.1, pieces=[(3, 0.8, "e4"), (5, 0.06, "a8")]), [(3, "e4")])
+    result = metric.compute()
+    assert result["Piece_EndToEnd_Threshold"] == pytest.approx(0.8)  # Board score is only 0.1.
+    assert result["Piece_EndToEnd_Incorrect_Squares"] == 0
+    assert metric.piece_confusion_matrix()[EMPTY, 5] == 1  # Existing fixed 0.05 diagnostics.
+
+
+def test_sweep_matches_brute_force_including_ties_wrong_classes_and_failures():
+    rng = np.random.default_rng(17)
+    for _ in range(50):
+        frames = []
+        for _ in range(4):
+            truth = {s: int(rng.integers(0, 12)) for s in range(12) if rng.random() < 0.6}
+            found = {s: (int(rng.integers(0, 12)), float(rng.choice([0, 0.1, 0.5, 0.9, 1]))) for s in range(12) if rng.random() < 0.7}
+            frames.append((found, truth))
+        frames.append(({}, {0: 1}))  # Extraction failure is included in the denominator.
+        thresholds = {1.0} | {score for found, _ in frames for _, score in found.values()}
+        results = []
+        for threshold in thresholds:
+            errors = 0
+            for found, truth in frames:
+                accepted = {s: cls for s, (cls, score) in found.items() if score >= threshold}
+                errors += sum(accepted.get(s, EMPTY) != truth.get(s, EMPTY) for s in range(64))
+            results.append((errors / len(frames), -threshold))
+        errors, negative_threshold = min(results)
+        assert tune_piece_threshold(frames) == pytest.approx((errors, -negative_threshold))
+
+
+def test_sweep_accepts_tied_scores_together_and_prefers_highest_threshold():
+    assert tune_piece_threshold([({0: (3, 0.5), 1: (3, 0.5)}, {0: 3})]) == (1, 1)
+    assert tune_piece_threshold([({0: (3, 1.0)}, {})]) == (1, 1)  # >= 1 still accepts score 1.
+    assert tune_piece_threshold([({}, {})]) == (0, 1)
+    assert tune_piece_threshold([]) == (-1, -1)
+
+
+def test_confusion_percentages_use_all_empty_squares_and_render_below_counts():
+    _, confusion = match_squares({0: (3, 0.9), 1: (5, 0.8)}, {0: 3, 2: 3})
+    percentages = confusion_percentages(confusion)
+    assert percentages[3, EMPTY] == 50
+    assert percentages[EMPTY, 5] == pytest.approx(100 / 62)
+    assert np.isnan(percentages[1]).all()
+    figure = confusion_figure(confusion)
+    assert "1\n(50.0%)" in [text.get_text() for text in figure.axes[0].texts]
+
+
+def test_unscorable_annotation_is_excluded_and_empty_metrics_are_undefined():
+    metric = make_metric()
+    scores, coords, point_scores = (torch.from_numpy(x)[None] for x in raw_outputs())
+    joints, labels = annotation([(3, "e4")], visible_landmarks=3)
+    metric._update_pieces(((None, scores, coords, point_scores),), [SimpleNamespace(joints=joints, labels=labels)])
+    result = metric.compute()
+    assert result["Piece_mAP"] == result["Piece_Color_Accuracy"] == result["Piece_EndToEnd_Incorrect_Squares"] == -1
+    assert metric.piece_confusion_matrix().sum() == 0
+
+
+def test_distributed_states_produce_global_ap_color_and_threshold(monkeypatch):
+    from copy import deepcopy
+
+    left, right, combined = make_metric(), make_metric(), make_metric()
+    first = raw_outputs(pieces=[(3, 0.8, "e4"), (5, 0.2, "a8")])
+    second = raw_outputs(pieces=[(9, 0.7, "e4"), (3, 0.1, "d4")])
+    update(left, first, [(3, "e4")])
+    update(right, second, [(3, "e4"), (3, "d4")])
+    update(combined, first, [(3, "e4")])
+    update(combined, second, [(3, "e4"), (3, "d4")])
+    states = iter(
+        deepcopy(getattr(right, name))
+        for name in (
+            "predictions",
+            "board_predictions",
+            "board_relaxed_predictions",
+            "piece_predictions",
+            "piece_confusions",
+            "piece_color_counts",
+            "piece_end_to_end_frames",
+        )
+    )
+
+    def gather(destination, local):
+        destination[:] = [deepcopy(local), next(states)]
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
+    left.is_distributed, left.world_size, left.rank = True, 2, 0
+    left._sync_dist()
+    left.is_distributed = False
+    assert left.compute() == pytest.approx(combined.compute())
+    assert np.array_equal(left.piece_confusion_matrix(), combined.piece_confusion_matrix())
