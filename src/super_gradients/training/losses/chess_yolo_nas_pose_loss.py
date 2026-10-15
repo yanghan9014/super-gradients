@@ -15,7 +15,6 @@ from .functional import bbox_ciou_loss
 
 from .ppyolo_loss import GIoULoss, batch_iou_similarity, check_points_inside_bboxes, gather_topk_anchors, compute_max_iou_anchor
 
-from super_gradients.training.datasets.pose_estimation_datasets.yolo_nas_pose_collate_fn import undo_flat_collate_tensors_with_batch_index
 
 
 @dataclasses.dataclass
@@ -423,47 +422,27 @@ class ChessYoloNASPoseLoss(nn.Module):
         """
         target_boxes, target_joints, target_class_labels = targets
 
-        image_index = target_boxes[:, 0]
-        gt_bbox = target_boxes[:, 1:5]
+        image_index = target_boxes[:, 0].long()
+        # A single device sync for the padded size, instead of several per image.
+        counts = torch.bincount(image_index, minlength=batch_size)
+        max_boxes = int(counts.max())
+        # Each target's slot within its image, in collated order.
+        order = torch.argsort(image_index, stable=True)
+        image_index = image_index[order]
+        slot = torch.arange(len(order), device=order.device) - (torch.cumsum(counts, dim=0) - counts)[image_index]
 
-        per_image_class = []
-        per_image_bbox = []
-        per_image_pad_mask = []
-        per_image_targets = undo_flat_collate_tensors_with_batch_index(target_joints, batch_size)
-        per_image_label_ids = undo_flat_collate_tensors_with_batch_index(target_class_labels, batch_size)
+        def padded(values: Tensor, dtype: torch.dtype) -> Tensor:
+            result = values.new_zeros((batch_size, max_boxes) + values.shape[1:], dtype=dtype)
+            result[image_index, slot] = values[order].to(dtype)
+            return result
 
-        max_boxes = 0
-        for i in range(batch_size):
-            mask = image_index == i
-
-            image_bboxes = gt_bbox[mask, :]
-            valid_bboxes = image_bboxes.sum(dim=1, keepdims=True) > 0
-
-            per_image_bbox.append(image_bboxes)
-            per_image_pad_mask.append(valid_bboxes)
-            per_image_class.append(per_image_label_ids[i].long())
-
-            max_boxes = max(max_boxes, mask.sum().item())
-
-        for i in range(batch_size):
-            elements_to_pad = max_boxes - len(per_image_bbox[i])
-            padding_left = 0
-            padding_right = 0
-            padding_top = 0
-            padding_bottom = elements_to_pad
-            pad = padding_left, padding_right, padding_top, padding_bottom
-            per_image_class[i] = F.pad(per_image_class[i], pad, mode="constant", value=0)
-            per_image_bbox[i] = F.pad(per_image_bbox[i], pad, mode="constant", value=0)
-            per_image_pad_mask[i] = F.pad(per_image_pad_mask[i], pad, mode="constant", value=0)
-            per_image_targets[i] = F.pad(per_image_targets[i], (0, 0) + pad, mode="constant", value=0)
-
-        new_targets = {
-            "gt_class": torch.stack(per_image_class, dim=0),
-            "gt_bbox": torch.stack(per_image_bbox, dim=0),
-            "pad_gt_mask": torch.stack(per_image_pad_mask, dim=0),
-            "gt_poses": torch.stack(per_image_targets, dim=0),
+        gt_bbox = padded(target_boxes[:, 1:5], target_boxes.dtype)
+        return {
+            "gt_class": padded(target_class_labels[:, 1:], torch.long),
+            "gt_bbox": gt_bbox,
+            "pad_gt_mask": gt_bbox.sum(dim=-1, keepdim=True) > 0,
+            "gt_poses": padded(target_joints[..., 1:], target_joints.dtype),
         }
-        return new_targets
 
     def forward(
         self,

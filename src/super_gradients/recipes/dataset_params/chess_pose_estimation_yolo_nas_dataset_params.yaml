@@ -20,6 +20,12 @@ train_dataset_params:
   include_empty_samples: True
   preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: mask_as_normal
+  # Shrink on load: the transforms below never enlarge beyond this, so detail is unchanged.
+  load_size:
+    - ${dataset_params.image_width}
+    - ${dataset_params.image_height}
+  # Piece boxes span one board square around the piece (see ChessPoseEstimationDataset).
+  piece_box_squares: 1.0
 
   transforms:
 
@@ -92,6 +98,12 @@ val_dataset_params:
   include_empty_samples: True
   preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: no_action
+  # Shrink on load: the transforms below never enlarge beyond this, so detail is unchanged.
+  load_size:
+    - ${dataset_params.image_width}
+    - ${dataset_params.image_height}
+  # Piece boxes span one board square around the piece (see ChessPoseEstimationDataset).
+  piece_box_squares: 1.0
 
   transforms:
     # Preserve the entire photo; center with black padding on only one axis.
@@ -109,15 +121,18 @@ train_dataloader_params:
   dataset: ChessPoseEstimationDataset
   shuffle: True
   batch_size: 32
-  num_workers: 24
+  # Throughput levels off from 12 workers on the 16-core training PC.
+  num_workers: 16
   drop_last: True
-  pin_memory: False
+  pin_memory: True
+  persistent_workers: True
   collate_fn: ChessYoloNASPoseCollateFN
 
 val_dataloader_params:
   dataset: ChessPoseEstimationDataset
   batch_size: 32
-  num_workers: 24
+  num_workers: 8
   drop_last: False
-  pin_memory: False
+  pin_memory: True
+  persistent_workers: True
   collate_fn: ChessYoloNASPoseCollateFN

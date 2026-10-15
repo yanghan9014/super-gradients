@@ -1,4 +1,6 @@
 import random
+
+import cv2
 import numpy as np
 
 from typing import Tuple, List
@@ -43,6 +45,14 @@ class KeypointsBrightnessContrast(AbstractKeypointTransform):
             brightness_gain = random.uniform(self.brightness_range[0], self.brightness_range[1])
 
             input_dtype = sample.image.dtype
+            if input_dtype == np.uint8 and sample.image.ndim == 3 and sample.image.shape[2] == 3:
+                # A per-channel affine map: a 256-entry table gives the same values without full-size float copies.
+                mean_brightness = np.array(cv2.mean(sample.image)[:3], dtype=np.float32)
+                values = np.arange(256, dtype=np.float32)[:, None]
+                table = (values - mean_brightness) * contrast_gain + mean_brightness * brightness_gain
+                sample.image = cv2.LUT(sample.image, np.clip(table, 0, 255).astype(np.uint8).reshape(256, 1, 3))
+                return sample
+
             image = sample.image.astype(np.float32)
             mean_brightness = np.mean(image, axis=(0, 1))
 

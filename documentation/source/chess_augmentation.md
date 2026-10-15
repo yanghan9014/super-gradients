@@ -2,6 +2,8 @@
 
 The chess pose recipe uses:
 
+0. Loading shrinks each photo to the smallest size that still covers 640 x 480
+   (reduced-size JPEG decoding, then an area resize), scaling annotations to match.
 1. Brightness, contrast, HSV, blur, noise, and JPEG compression.
 2. Board-aware random framing into 640 x 480 with black padding.
 3. Combined rotation, shear, and optional perspective distortion.
@@ -48,5 +50,12 @@ resolved configuration.
 
 The crop retains its existing size policy: it never zooms in beyond the largest
 inscribed 4:3 window. Naturally small boards and already incomplete source boards
-remain possible. Pixel-sized blur/noise acts at source resolution, before downsampling;
-its apparent strength therefore depends on source resolution.
+remain possible. Because of that policy (and the letterbox's), the load-time shrink in
+step 0 discards no detail the network sees; it only cuts augmentation work and
+replaces aliased bilinear downscaling with area averaging. Pixel-sized blur/noise acts
+at that loaded resolution, so its apparent strength no longer depends on the source.
+
+Piece boxes are rebuilt at load: each becomes the image extent of one board square
+centred on the piece, using the homography from the board's annotated landmarks. The
+annotated boxes are a fixed 64 source pixels, which ranged from 0.7x to 2.9x a square
+across photo resolutions; boxes decide anchor assignment and the piece OKS scale.

@@ -1,5 +1,5 @@
 import os
-from typing import Tuple, List, Union
+from typing import Optional, Tuple, List, Union
 
 import cv2
 import numpy as np
@@ -53,6 +53,9 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         remove_duplicate_annotations: bool = False,
         crowd_annotations_action: CrowdAnnotationActionEnum = CrowdAnnotationActionEnum.NO_ACTION,
         preserve_out_of_frame_board_annotations: bool = False,
+        load_size: Optional[Tuple[int, int]] = None,
+        piece_box_squares: Optional[float] = None,
+        board_class_id: int = 12,
     ):
         """
 
@@ -76,6 +79,15 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
                                              "drop_annotation" - Crowd annotations will be dropped from the dataset.
                                              "mask_as_normal" - These annotations will be treated as normal (non-crowd) annotations.
                                              "no_action" - No action will be taken for crowd annotations.
+        :param load_size:                    (width, height). If set, images are shrunk while loading to the smallest size that
+                                             still covers it. Only valid when no later transform enlarges the image beyond that
+                                             size (true of the board-framed crop and the letterbox), so the network sees the
+                                             same detail while augmentation works on far fewer pixels.
+        :param piece_box_squares:            If set, each piece's box becomes the image extent of a cell this many squares wide,
+                                             centred on the piece in board coordinates. The annotated boxes are a fixed pixel size,
+                                             so they don't follow piece size across photo resolutions. Boxes set the loss's
+                                             anchor assignment and OKS scale. Pieces in images without a board fit keep theirs.
+        :param board_class_id:               Class of the board, whose landmarks give the board coordinates.
         """
         json_file = os.path.join(data_dir, json_file)
         if not os.path.exists(json_file) or not os.path.isfile(json_file):
@@ -97,6 +109,10 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
             edge_colors=edge_colors,
             keypoint_colors=keypoint_colors,
         )
+        if piece_box_squares is not None:
+            for ann in self.annotations:
+                _set_board_relative_piece_boxes(ann, piece_box_squares, board_class_id)
+        self.load_size = tuple(load_size) if load_size is not None else None
         self.non_empty_annotation_indexes = np.argwhere([len(ann.ann_keypoints) > 0 for ann in self.annotations]).flatten()
         self.include_empty_samples = include_empty_samples
         self.transforms.preserve_out_of_frame_board_annotations = preserve_out_of_frame_board_annotations
@@ -124,31 +140,14 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         gt_areas = ann.ann_areas.copy()
         gt_class_id = ann.ann_class_labels.copy()
 
-        orig_image = cv2.imread(ann.image_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
-        if orig_image is None:
-            # This is a nice fallback/hack to handle case when OpenCV cannot read some images
-            # In happens to some OpenCV versions for COCO datasets (There are 1-2 corrupted images)
-            # But we generaly want to read with OpenCV since it's much faster than PIL
-            from PIL import Image
-
-            orig_image = np.array(Image.open(ann.image_path).convert("RGB"))
-        else:
-            orig_image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
-
+        orig_image, (scale_x, scale_y) = self._read_image(ann)
         image_height, image_width = orig_image.shape[:2]
-        if image_height != ann.image_height or image_width != ann.image_width:
-            if image_height == ann.image_width and image_width == ann.image_height:
-                # logger.warning(
-                #     "Annotated image size is swapped (H,W) for %s: ann=%s file=%s. Using file size.",
-                #     ann.image_path,
-                #     (ann.image_height, ann.image_width),
-                #     (image_height, image_width),
-                # )
-                pass
-            else:
-                raise RuntimeError(
-                    f"Annotated image size ({ann.image_height,ann.image_width}) does not match image size in file {(image_height, image_width)}"
-                )
+        if (scale_x, scale_y) != (1.0, 1.0):
+            gt_joints[:, :, 0] *= scale_x
+            gt_joints[:, :, 1] *= scale_y
+            gt_bboxes[:, [0, 2]] *= scale_x
+            gt_bboxes[:, [1, 3]] *= scale_y
+            gt_areas = gt_areas * (scale_x * scale_y)
 
         # Clip bboxes to image boundaries (Some annotations extend 1-2px outside of image boundaries)
         image_shape = (image_height, image_width)
@@ -159,11 +158,52 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         gt_bboxes_xywh = xyxy_to_xywh(gt_bboxes, image_shape=(image_height, image_width))
 
         # mask: np.ndarray = self._get_crowd_mask(gt_segmentations[gt_iscrowd], image_shape)
-        mask = np.ones(image_shape, dtype=np.float32)
+        # Nothing downstream reads the mask beyond carrying it through the transforms.
+        mask = np.ones(image_shape, dtype=np.uint8)
 
         return ChessPoseEstimationSample(
             image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, labels=gt_class_id, bboxes_xywh=gt_bboxes_xywh, additional_samples=None
         )
+
+    def _read_image(self, ann) -> Tuple[np.ndarray, Tuple[float, float]]:
+        """RGB image, shrunk to cover `load_size` if set, and the (x, y) scale from file to returned pixels.
+
+        JPEG decodes directly at 1/2, 1/4 or 1/8 size where that still covers the target; an area resize does the rest.
+        """
+        file_size = np.array([ann.image_width, ann.image_height], dtype=np.float64)
+        scale = 1.0 if self.load_size is None else min(1.0, float(np.max(np.divide(self.load_size, file_size))))
+        reduction = next(r for r in (8, 4, 2, 1) if r * scale <= 1)
+        flags = {1: cv2.IMREAD_COLOR, 2: cv2.IMREAD_REDUCED_COLOR_2, 4: cv2.IMREAD_REDUCED_COLOR_4, 8: cv2.IMREAD_REDUCED_COLOR_8}[reduction]
+        image = cv2.imread(ann.image_path, flags | cv2.IMREAD_IGNORE_ORIENTATION)
+        if image is None:
+            # Some OpenCV versions cannot read a few files. Note: PIL applies no EXIF orientation here either.
+            from PIL import Image
+
+            image, reduction = np.array(Image.open(ann.image_path).convert("RGB")), 1
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        decoded = np.array(image.shape[1::-1], dtype=np.float64)
+        # Reduced JPEG decoding rounds sizes up, other formats to the nearest pixel.
+        if np.all(np.abs(decoded - file_size / reduction) <= 1):
+            pass
+        elif np.all(np.abs(decoded - file_size[::-1] / reduction) <= 1):
+            # Annotated (H, W) is swapped relative to the file; use the file's own orientation.
+            file_size = file_size[::-1]
+        else:
+            raise RuntimeError(f"Annotated image size {tuple(file_size[::-1])} does not match image size in file {ann.image_path}")
+
+        if self.load_size is not None:
+            scale = min(1.0, float(np.max(np.divide(self.load_size, file_size))))
+        target = np.maximum(np.round(file_size * scale), 1).astype(int)
+        if np.any(target > decoded):
+            # Only possible for swapped sizes: decode again at full size.
+            image = cv2.cvtColor(cv2.imread(ann.image_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION), cv2.COLOR_BGR2RGB)
+            decoded = np.array(image.shape[1::-1], dtype=np.float64)
+        if np.any(target != decoded):
+            image = cv2.resize(image, tuple(int(v) for v in target), interpolation=cv2.INTER_AREA)
+        scale_x, scale_y = (target / file_size).tolist() if np.any(target != file_size) else (1.0, 1.0)
+        return image, (scale_x, scale_y)
 
     # def _get_crowd_mask(self, segmentations: List[str], image_shape: Tuple[int, int]) -> np.ndarray:
     #     """
@@ -194,3 +234,42 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
             keypoint_colors=self.keypoint_colors,
         )
         return params
+
+
+def _set_board_relative_piece_boxes(ann, squares: float, board_class_id: int) -> None:
+    """Replace piece boxes (and areas) with the image extent of a square cell centred on each piece in board coordinates.
+
+    Board coordinates come from the board's annotated landmarks (one unit = one square). Images without exactly one
+    board with 4+ usable landmarks, and cells that cross the board plane's horizon, keep their annotated boxes.
+    """
+    from super_gradients.training.metrics.board_homography_metrics import BOARD_REFERENCE_POINTS
+
+    labels = np.asarray(ann.ann_class_labels).reshape(-1)
+    if len(labels) == 0:
+        return
+    boards = np.flatnonzero(labels == board_class_id)
+    pieces = np.flatnonzero((labels != board_class_id) & (ann.ann_keypoints[:, 0, 2] > 0))
+    if len(boards) != 1 or len(pieces) == 0:
+        return
+    landmarks = ann.ann_keypoints[boards[0]].astype(np.float64)
+    usable = (landmarks[:, 2] > 0) & np.isfinite(landmarks[:, :2]).all(axis=1)
+    if usable.sum() < 4:
+        return
+    to_board, _ = cv2.findHomography(landmarks[usable, :2], BOARD_REFERENCE_POINTS[usable], 0)
+    if to_board is None or not np.isfinite(to_board).all():
+        return
+    to_image = np.linalg.inv(to_board)
+
+    centres = cv2.perspectiveTransform(ann.ann_keypoints[pieces, 0:1, :2].astype(np.float64), to_board).reshape(-1, 1, 2)
+    half = squares / 2
+    cells = centres + np.array([[-half, -half], [half, -half], [half, half], [-half, half]])
+    projected = np.concatenate([cells, np.ones(cells.shape[:2] + (1,))], axis=-1) @ to_image.T
+    # The homogeneous coordinate keeps the board centre's sign on the camera's side of the horizon.
+    side = np.sign((np.array([4.0, 4.0, 1.0]) @ to_image.T)[2])
+    keep = (projected[..., 2] * side > 1e-9).all(axis=1)
+    corners = projected[keep, :, :2] / projected[keep, :, 2:3]
+    boxes = np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1)
+    ann.ann_boxes_xyxy = ann.ann_boxes_xyxy.astype(np.float32, copy=True)
+    ann.ann_areas = ann.ann_areas.astype(np.float32, copy=True)
+    ann.ann_boxes_xyxy[pieces[keep]] = boxes
+    ann.ann_areas[pieces[keep]] = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])

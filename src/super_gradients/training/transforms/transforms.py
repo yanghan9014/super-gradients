@@ -1624,6 +1624,13 @@ def augment_hsv(img: np.ndarray, hgain: float, sgain: float, vgain: float, bgr_c
     hsv_augs = np.random.uniform(-1, 1, 3) * [hgain, sgain, vgain]  # random gains
     hsv_augs *= np.random.randint(0, 2, 3)  # random selection of h, s, v
     hsv_augs = hsv_augs.astype(np.int16)
+    if img.dtype == np.uint8:
+        # The same per-channel shifts as below, applied as one lookup table instead of on int16 copies.
+        values = np.arange(256, dtype=np.int16)
+        table = np.stack([(values + hsv_augs[0]) % 180, np.clip(values + hsv_augs[1], 0, 255), np.clip(values + hsv_augs[2], 0, 255)], axis=-1)
+        img_hsv = cv2.LUT(cv2.cvtColor(img[..., bgr_channels], cv2.COLOR_BGR2HSV), table.astype(np.uint8).reshape(256, 1, 3))
+        img[..., bgr_channels] = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR)  # no return needed
+        return img
     img_hsv = cv2.cvtColor(img[..., bgr_channels], cv2.COLOR_BGR2HSV).astype(np.int16)
 
     img_hsv[..., 0] = (img_hsv[..., 0] + hsv_augs[0]) % 180
