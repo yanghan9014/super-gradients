@@ -98,20 +98,20 @@ val_dataset_params:
   include_empty_samples: True
   preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: no_action
-  # Shrink on load: the transforms below never enlarge beyond this, so detail is unchanged.
-  load_size:
-    - ${dataset_params.image_width}
-    - ${dataset_params.image_height}
+  # No shrink on load: the framing below may crop in on a small board and needs the full photo.
   # Piece boxes span one board square around the piece (see ChessPoseEstimationDataset).
   piece_box_squares: 1.0
 
   transforms:
-    # Preserve the entire photo; center with black padding on only one axis.
-    - KeypointsLetterbox:
+    # The entire photo, centred with black padding on one axis; but where the board covers less than the
+    # app's setup minimum (AppConfig.minBoardFrameFraction), crop to the board plus two squares first.
+    - KeypointsBoardFocusLetterbox:
         output_height: ${dataset_params.image_height}
         output_width: ${dataset_params.image_width}
         image_pad_value: [0, 0, 0]
         mask_pad_value: 1
+        min_board_fraction: 0.12
+        margin_squares: 2
 
     - KeypointsImageStandardize:
         max_value: 255

@@ -29,11 +29,19 @@ fail, geometry is the identity. This intentionally makes the accepted angle and
 perspective distributions depend on the framing; it does not shrink the board to
 fit a rejected angle. The limits and attempt count are recipe parameters.
 
-Validation uses `KeypointsLetterbox`: resize the entire image proportionally to fit
-640 x 480, then center with black padding on only one axis (or none for a 4:3 image).
-There is no board-dependent crop or extra margin. Opposite padding widths differ by
-at most one pixel. Dataset and inference share the same image processors, including
-rounding and inverse coordinate mapping.
+Validation uses `KeypointsBoardFocusLetterbox`: resize the entire image proportionally
+(area averaging) to fit 640 x 480, then center with black padding on only one axis (or
+none for a 4:3 image). Opposite padding widths differ by at most one pixel.
+
+The exception is a board the app would refuse as too small: its a1-a8-h8-h1 outline
+covering less than 0.12 of the letterboxed frame (`AppConfig.minBoardFrameFraction`).
+Then the photo is first cropped to the board plus two squares on every side, measured
+through the annotation homography, widened to 4:3 around the board and slid back inside
+the photo. No padding is added for margin the photo lacks; an axis the crop cannot fit
+keeps the whole photo. Pieces outside the crop are dropped. The crop follows only from
+the annotations, so validation frames are identical on every run. Inference has no
+annotations and uses the plain whole-image letterbox. The SightCheck evaluator imports
+the same window function.
 
 Both new dataset recipes enable `preserve_out_of_frame_board_annotations`. Known
 finite board annotations retain their coordinates through initial source clipping
