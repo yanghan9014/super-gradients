@@ -2,12 +2,16 @@
 
 The chess pose recipe uses:
 
-0. Loading shrinks each photo to the smallest size that still covers 640 x 480
-   (reduced-size JPEG decoding, then an area resize), scaling annotations to match.
-1. Brightness, contrast, HSV, blur, noise, and JPEG compression.
-2. Board-aware random framing into 640 x 480 with black padding.
-3. Combined rotation, shear, and optional perspective distortion.
+1. Board-aware random framing of a 4:3 window. The full-resolution photo is shrunk once,
+   by area averaging, to the output scale; the window itself is cut in step 3.
+2. Brightness, contrast and HSV (blur, noise and JPEG compression are currently disabled).
+3. Combined rotation, shear, and optional perspective distortion, warped together with the
+   framing cut in one cubic resample to 640 x 480 with black padding.
 4. Normalization and removal of empty/small instances.
+
+So each training image is resampled twice in total: one area shrink and one near-1x cubic
+warp. Previously a half-size JPEG decode, an area shrink and two bilinear warps made
+training images about 2.7x softer (Laplacian variance) than this.
 
 Framing before geometry prevents rotation from clipping a board against the original
 portrait or panoramic image boundaries before the eventual 4:3 canvas is available.
@@ -51,17 +55,16 @@ are excluded. Piece annotations still require an in-source target. This flag is
 opt-in so saved historical recipes keep their previous annotation policy.
 
 Every configured image padding/fill value is zero. Random square masking is removed.
-Appearance effects run before framing and geometry so they cannot brighten padding.
+Appearance effects run before the geometry warp adds padding, so they cannot brighten it.
 The image-only wrapper leaves annotations untouched and rejects geometric transforms.
 Changing this recipe affects future runs; it does not alter an existing run's
 resolved configuration.
 
 The crop retains its existing size policy: it never zooms in beyond the largest
 inscribed 4:3 window. Naturally small boards and already incomplete source boards
-remain possible. Because of that policy (and the letterbox's), the load-time shrink in
-step 0 discards no detail the network sees; it only cuts augmentation work and
-replaces aliased bilinear downscaling with area averaging. Pixel-sized blur/noise acts
-at that loaded resolution, so its apparent strength no longer depends on the source.
+remain possible. Because of that policy, the shrink in step 1 discards no detail the
+network sees; it also means appearance augmentation runs on a small image. Pixel-sized
+blur/noise acts at the output scale, so its apparent strength does not depend on the source.
 
 Piece boxes are rebuilt at load: each becomes the image extent of one board square
 centred on the piece, using the homography from the board's annotated landmarks. The

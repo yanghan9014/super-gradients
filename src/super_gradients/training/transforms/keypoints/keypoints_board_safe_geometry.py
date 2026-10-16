@@ -1,5 +1,7 @@
 import math
 import random
+from types import SimpleNamespace
+from typing import Iterable
 
 import cv2
 import numpy as np
@@ -34,6 +36,7 @@ class KeypointsBoardSafeGeometry(KeypointsRandomPerspectiveTransform):
         board_class_id=12,
         image_pad_value=0,
         mask_pad_value=1,
+        interpolation_mode=cv2.INTER_LINEAR,
     ):
         if not 0 <= max_rotation <= 180 or not 0 <= max_shear < 45:
             raise ValueError("Rotation must be in [0, 180] and shear in [0, 45) degrees")
@@ -43,7 +46,9 @@ class KeypointsBoardSafeGeometry(KeypointsRandomPerspectiveTransform):
             raise ValueError("min_retained_fraction must be in (0, 1]")
         if not isinstance(max_attempts, int) or max_attempts < 1 or not isinstance(min_visible_keypoints, int) or min_visible_keypoints < 1:
             raise ValueError("max_attempts and min_visible_keypoints must be positive integers")
-        super().__init__(distortion_scale=distortion_scale, image_pad_value=image_pad_value, mask_pad_value=mask_pad_value, prob=1.0)
+        super().__init__(
+            distortion_scale=distortion_scale, image_pad_value=image_pad_value, mask_pad_value=mask_pad_value, interpolation_mode=interpolation_mode, prob=1.0
+        )
         self.max_rotation = max_rotation
         self.max_shear = max_shear
         self.perspective_prob = perspective_prob
@@ -85,6 +90,35 @@ class KeypointsBoardSafeGeometry(KeypointsRandomPerspectiveTransform):
             if all(self._retains_board(points, matrix, width, height) for points in board_points):
                 return matrix, corners, cv2.perspectiveTransform(corners[None], matrix)[0]
         return np.eye(3), corners, corners.copy()
+
+    def apply_to_sample(self, sample):
+        """Warp as usual; after KeypointsBoardFramedCrop(defer_crop=True), also cut its window in the same warp.
+
+        The geometry is sampled on the output canvas exactly as for an already-cut image, so annotations and random
+        draws are unchanged. The image is resampled once instead of twice, and anything outside the window is padding,
+        as if it had been cut first.
+        """
+        if sample.pending_crop is None:
+            return super().apply_to_sample(sample)
+        left, top, width, height = sample.pending_crop
+        random.random()  # The parent's probability draw (prob is 1), so random sequences match the uncut path.
+        canvas = SimpleNamespace(image=np.broadcast_to(np.uint8(0), (height, width)), joints=sample.joints, labels=sample.labels)
+        matrix, _, corners = self._get_sample_matrix(canvas, self._distortion_scales())
+        interpolation = random.choice(self.interpolation_mode)
+        warp = matrix @ np.array([[1, 0, -left], [0, 1, -top], [0, 0, 1]])
+
+        pad = tuple(self.image_pad_value) if isinstance(self.image_pad_value, Iterable) else (self.image_pad_value,) * sample.image.shape[-1]
+        image = cv2.warpPerspective(sample.image, warp, (width, height), flags=interpolation, borderMode=cv2.BORDER_CONSTANT, borderValue=pad)
+        mask = cv2.warpPerspective(sample.mask, warp, (width, height), flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=self.mask_pad_value)
+        inside = np.zeros(sample.image.shape[:2], dtype=np.uint8)
+        inside[max(round(top), 0) : round(top) + height, max(round(left), 0) : round(left) + width] = 1
+        outside = cv2.warpPerspective(inside, warp, (width, height), flags=cv2.INTER_NEAREST) == 0
+        image[outside] = pad
+        mask[outside] = self.mask_pad_value
+
+        sample.image, sample.mask, sample.pending_crop = image, mask, None
+        self._apply_to_annotations(sample, matrix, width, height, corners)
+        return sample.sanitize_sample()
 
     def _retains_board(self, points, matrix, width, height):
         projected = cv2.perspectiveTransform(points[None], matrix)[0]

@@ -20,15 +20,27 @@ train_dataset_params:
   include_empty_samples: True
   preserve_out_of_frame_board_annotations: True
   crowd_annotations_action: mask_as_normal
-  # Shrink on load: the transforms below never enlarge beyond this, so detail is unchanged.
-  load_size:
-    - ${dataset_params.image_width}
-    - ${dataset_params.image_height}
+  # Full-resolution decode: the framed crop below shrinks it once, by area, to the output scale.
   # Piece boxes span one board square around the piece (see ChessPoseEstimationDataset).
   piece_box_squares: 1.0
 
   transforms:
 
+    # Frame the board in a 4:3 window like the app's camera crop, at a random size and position.
+    # defer_crop: shrink the photo to the output scale now and cut the window inside the geometry warp
+    # below, so each image is resampled once (area) plus one cubic warp, instead of twice bilinearly.
+    - KeypointsBoardFramedCrop:
+        output_height: ${dataset_params.image_height}
+        output_width: ${dataset_params.image_width}
+        randomize: True
+        preserve_out_of_frame_board_annotations: True
+        max_board_fraction: 0.85
+        min_board_fraction: 0.5
+        image_pad_value: [0, 0, 0]
+        mask_pad_value: 1
+        defer_crop: True
+
+    # Appearance precedes geometry so newly added padding remains black.
     - KeypointsBrightnessContrast:
         brightness_range: [ 0.4, 1.6 ]
         contrast_range: [ 0.8, 1.2 ]
@@ -40,7 +52,6 @@ train_dataset_params:
         vgain: 20
         prob: 1.0
 
-    # Appearance precedes geometry so newly added padding remains black.
     # Disabled for the next appearance-augmentation experiment.
     # - KeypointsImageOnlyAugmentation:
     #     transforms:
@@ -55,18 +66,8 @@ train_dataset_params:
     #           quality_upper: 95
     #           p: 0.2
 
-    # Frame the board in a 4:3 window like the app's camera crop, at a random size and position.
-    - KeypointsBoardFramedCrop:
-        output_height: ${dataset_params.image_height}
-        output_width: ${dataset_params.image_width}
-        randomize: True
-        preserve_out_of_frame_board_annotations: True
-        max_board_fraction: 0.85
-        min_board_fraction: 0.5
-        image_pad_value: [0, 0, 0]
-        mask_pad_value: 1
-
     # Check the combined geometry before warping: allow modest clipping, never most of a board.
+    # Also cuts the framed crop's window, in one cubic warp (interpolation_mode 2 = cv2.INTER_CUBIC).
     - KeypointsBoardSafeGeometry:
         max_rotation: 90
         max_shear: 5
@@ -77,6 +78,7 @@ train_dataset_params:
         max_attempts: 20
         image_pad_value: [0, 0, 0]
         mask_pad_value: 1
+        interpolation_mode: 2
 
     - KeypointsImageStandardize:
         max_value: 255

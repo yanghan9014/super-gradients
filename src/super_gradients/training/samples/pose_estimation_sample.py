@@ -2,7 +2,7 @@ import dataclasses
 import numpy as np
 import torch
 
-from typing import Optional, List, Union
+from typing import Optional, List, Tuple, Union
 
 from super_gradients.training.datasets.data_formats.bbox_formats.xywh import xywh_to_xyxy, xyxy_to_xywh
 
@@ -28,6 +28,9 @@ class PoseEstimationSample:
     :param is_crowd:           (Optional) Numpy array of [N] shape with is_crowd flag for each instance
     :param labels:             (Optional) Numpy array of [N] shape with class label for each instance
     :param additional_samples: (Optional) List of additional samples for the same image.
+    :param pending_crop:       (Optional) (left, top, width, height) of an output window not yet cut from `image`, in image
+                               pixels. Set by KeypointsBoardFramedCrop(defer_crop=True), whose annotations are already in
+                               window coordinates; KeypointsBoardSafeGeometry cuts it in the same warp as its geometry.
     """
 
     image: Union[np.ndarray, torch.Tensor]
@@ -38,6 +41,7 @@ class PoseEstimationSample:
     is_crowd: Optional[np.ndarray] = None
     labels: Optional[np.ndarray] = None
     additional_samples: Optional[List["PoseEstimationSample"]] = None
+    pending_crop: Optional[Tuple[float, float, int, int]] = None
 
     @classmethod
     def compute_area_of_joints_bounding_box(cls, joints) -> np.ndarray:
