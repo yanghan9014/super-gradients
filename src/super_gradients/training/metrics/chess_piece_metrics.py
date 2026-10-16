@@ -92,12 +92,7 @@ def app_square_readings(
     keypoints [A, 9, 2] and keypoint scores [A, 9]. An empty result means the app would have
     no board state for this frame (no board, fewer than four landmarks, or no pieces on it).
     """
-    board_scores = class_scores[:, BOARD_CLASS_ID]
-    boards = np.flatnonzero(board_scores >= confidence_threshold)
-    if len(boards) == 0:
-        return {}
-    best = boards[np.argmax(board_scores[boards])]
-    homography = _board_homography(pose_coords[best], pose_scores[best] >= board_keypoint_threshold, image_size)
+    homography = app_board_homography(class_scores, pose_coords, pose_scores, image_size, confidence_threshold, board_keypoint_threshold)
     if homography is None:
         return {}
     return square_readings(
@@ -107,6 +102,44 @@ def app_square_readings(
         image_size,
         confidence_threshold if piece_confidence_threshold is None else piece_confidence_threshold,
     )
+
+
+def app_board_homography(
+    class_scores: np.ndarray,
+    pose_coords: np.ndarray,
+    pose_scores: np.ndarray,
+    image_size: Tuple[int, int],
+    confidence_threshold: float = 0.05,
+    board_keypoint_threshold: float = 0.2,
+) -> Optional[np.ndarray]:
+    """The app's board geometry: its most confident board, fitted from landmarks above the keypoint cutoff."""
+    board_scores = class_scores[:, BOARD_CLASS_ID]
+    boards = np.flatnonzero(board_scores >= confidence_threshold)
+    if len(boards) == 0:
+        return None
+    best = boards[np.argmax(board_scores[boards])]
+    return _board_homography(pose_coords[best], pose_scores[best] >= board_keypoint_threshold, image_size)
+
+
+def board_rotated_180(predicted: Optional[np.ndarray], annotated: np.ndarray) -> bool:
+    """Whether the predicted board fits the annotation better turned 180 degrees, (x, y) -> (8 - x, 8 - y).
+
+    The same whole-board test as Board_Relaxed_AP: the annotated reference points, read through the predicted
+    homography, compared with and without the turn by their largest displacement. Ties and failures: not turned.
+    """
+    if predicted is None:
+        return False
+    with np.errstate(all="ignore"):
+        image_points = apply_homography(BOARD_COORDS, np.linalg.inv(annotated).astype(np.float32))
+        read = apply_homography(image_points, predicted)
+        strict = np.abs(read - BOARD_COORDS).max()
+        turned = np.abs((8.0 - read) - BOARD_COORDS).max()
+    return bool(turned < strict)
+
+
+def rotate_readings_180(readings: Dict[int, Tuple[int, float]]) -> Dict[int, Tuple[int, float]]:
+    """The same readings on a board turned 180 degrees: a1 <-> h8, square index s -> 63 - s."""
+    return {63 - square: reading for square, reading in readings.items()}
 
 
 def square_readings(class_scores, pose_coords, homography, image_size, confidence_threshold=0.0):

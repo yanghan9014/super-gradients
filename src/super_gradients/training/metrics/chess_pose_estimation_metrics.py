@@ -16,6 +16,9 @@ from super_gradients.training.metrics.board_homography_metrics import compute_bo
 from super_gradients.training.metrics.chess_piece_metrics import (
     PIECE_NAMES,
     annotated_board_homography,
+    app_board_homography,
+    board_rotated_180,
+    rotate_readings_180,
     annotated_squares,
     app_square_readings,
     match_squares,
@@ -104,7 +107,9 @@ class ChessPoseEstimationMetrics(Metric):
                                           points are reconstructed from the annotation homography. Invalid homographies
                                           never match; unevaluable annotations remain in the board recall denominator.
         :param piece_metrics:             Enables Piece_mAP, 12 Piece_AP/<class> values, Piece_Color_Accuracy, and
-                                          Piece_EndToEnd_Incorrect_Squares / Piece_EndToEnd_Threshold. AP/color use
+                                          Piece_EndToEnd_Incorrect_Squares / Piece_EndToEnd_Threshold, and their
+                                          Piece_EndToEnd_Relaxed_* versions, which accept a predicted board turned 180
+                                          degrees as Board_Relaxed_AP does. AP/color use
                                           annotated board geometry, no confidence cutoff, and one winner per square.
                                           AP requires exact class + square and averages represented classes equally
                                           (-1 for classes with no targets). Color accuracy is pooled over occupied GT
@@ -165,6 +170,7 @@ class ChessPoseEstimationMetrics(Metric):
             if num_joints != 9:
                 raise ValueError("Piece metrics require the nine chess board reference points")
             self.stats_names += ["Piece_mAP", "Piece_Color_Accuracy", "Piece_EndToEnd_Incorrect_Squares", "Piece_EndToEnd_Threshold"]
+            self.stats_names += ["Piece_EndToEnd_Relaxed_Incorrect_Squares", "Piece_EndToEnd_Relaxed_Threshold"]
             self.stats_names += [f"Piece_AP/{name}" for name in PIECE_NAMES]
 
         self.greater_component_is_better = dict((k, True) for k in self.stats_names)
@@ -172,6 +178,8 @@ class ChessPoseEstimationMetrics(Metric):
             self.greater_component_is_better["Piece_EndToEnd_Incorrect_Squares"] = False
             # This is operating-point metadata, not a model-quality objective.
             self.greater_component_is_better["Piece_EndToEnd_Threshold"] = False
+            self.greater_component_is_better["Piece_EndToEnd_Relaxed_Incorrect_Squares"] = False
+            self.greater_component_is_better["Piece_EndToEnd_Relaxed_Threshold"] = False
 
         if oks_sigmas is None:
             if num_joints == 17:
@@ -202,6 +210,7 @@ class ChessPoseEstimationMetrics(Metric):
         self.add_state("piece_confusions", default=[], dist_reduce_fx=None)
         self.add_state("piece_color_counts", default=[], dist_reduce_fx=None)
         self.add_state("piece_end_to_end_frames", default=[], dist_reduce_fx=None)
+        self.add_state("piece_end_to_end_relaxed_frames", default=[], dist_reduce_fx=None)
 
     @torch.no_grad()
     def update(
@@ -284,6 +293,12 @@ class ChessPoseEstimationMetrics(Metric):
                 piece_confidence_threshold=0.0,
             )
             self.piece_end_to_end_frames.append((app_readings, truth))
+            # Relaxed: a board read turned 180 degrees, judged by its geometry, has its squares turned back.
+            predicted = app_board_homography(
+                class_scores[i], pose_coords[i], pose_scores[i], self.piece_image_size, self.piece_confidence_threshold, self.piece_board_keypoint_threshold
+            )
+            relaxed = rotate_readings_180(app_readings) if board_rotated_180(predicted, homography) else app_readings
+            self.piece_end_to_end_relaxed_frames.append((relaxed, truth))
             fixed_readings = {s: reading for s, reading in app_readings.items() if reading[1] >= self.piece_confidence_threshold}
             _, confusion = match_squares(fixed_readings, truth)
             self.piece_confusions.append(confusion)
@@ -507,6 +522,7 @@ class ChessPoseEstimationMetrics(Metric):
                 "piece_confusions",
                 "piece_color_counts",
                 "piece_end_to_end_frames",
+                "piece_end_to_end_relaxed_frames",
             ):
                 gathered_state_dicts = [None] * self.world_size
                 torch.distributed.all_gather_object(gathered_state_dicts, getattr(self, state_name))
@@ -605,6 +621,9 @@ class ChessPoseEstimationMetrics(Metric):
             errors, threshold = tune_piece_threshold(self.piece_end_to_end_frames)
             metrics["Piece_EndToEnd_Incorrect_Squares"] = errors
             metrics["Piece_EndToEnd_Threshold"] = threshold
+            errors, threshold = tune_piece_threshold(self.piece_end_to_end_relaxed_frames)
+            metrics["Piece_EndToEnd_Relaxed_Incorrect_Squares"] = errors
+            metrics["Piece_EndToEnd_Relaxed_Threshold"] = threshold
 
         # Trainer zips computed values with component_names; insertion order must agree.
         return {name: metrics[name] for name in self.component_names}

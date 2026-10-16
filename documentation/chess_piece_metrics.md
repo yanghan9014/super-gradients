@@ -12,6 +12,8 @@ board are excluded from piece evaluation. Overall AP/AR and Board_* metrics are 
 | `Piece_Color_Accuracy` | Fraction with correct color among annotated occupied squares having a predicted reading in annotated board geometry. No confidence cutoff; type is ignored. Missing readings are excluded from this conditional statistic, but remain misses in AP. |
 | `Piece_EndToEnd_Incorrect_Squares` | Minimum mean incorrect squares per frame over a single global, validation-tuned piece threshold. Uses the predicted board. Missing, extra, or wrong-class readings each count once per square. Lower is better. |
 | `Piece_EndToEnd_Threshold` | Selected piece threshold, not a quality metric. Board confidence and keypoint thresholds remain fixed. Ties in error choose the highest threshold. |
+| `Piece_EndToEnd_Relaxed_Incorrect_Squares` | As `Piece_EndToEnd_Incorrect_Squares`, but a predicted board turned 180 degrees (a1 <-> h8) is accepted, as in `Board_Relaxed_AP`: when the annotated landmarks fit the predicted board better turned, that frame's squares are turned back before scoring. The turn is decided by board geometry alone, never by which reading scores better. The game tracker can recover a turned board, so this is closer to what it sees. |
+| `Piece_EndToEnd_Relaxed_Threshold` | The piece threshold selected for the relaxed count; same rules as `Piece_EndToEnd_Threshold`. |
 
 AP and color accuracy are fractions in [0, 1]. AP is -1 when a class has no annotated
 examples; such classes are excluded from mAP rather than treated as perfect or failed.

@@ -143,7 +143,7 @@ def test_metric_reports_macro_ap_color_and_keeps_confusion_until_reset():
     assert metric.piece_confusion_matrix().sum() == 64
     metric.reset()
     assert metric.piece_confusion_matrix().sum() == 0
-    assert metric.piece_predictions == metric.piece_color_counts == metric.piece_end_to_end_frames == []
+    assert metric.piece_predictions == metric.piece_color_counts == metric.piece_end_to_end_frames == metric.piece_end_to_end_relaxed_frames == []
 
 
 def test_logging_names_survive_lowercasing():
@@ -235,6 +235,29 @@ def test_end_to_end_tunes_piece_cutoff_without_changing_board_gate_or_confusion_
     assert metric.piece_confusion_matrix()[EMPTY, 5] == 1  # Existing fixed 0.05 diagnostics.
 
 
+def test_relaxed_end_to_end_accepts_a_board_read_turned_180_degrees():
+    # The pawn really is on e4, but the predicted board is turned: its "a1" sits on h8, so e4 reads as d5.
+    metric = make_metric()
+    scores, coords, point_scores = raw_outputs(pieces=[(3, 0.9, "e4")])
+    coords[0] = to_pixels(8.0 - BOARD_COORDS)
+    update(metric, (scores, coords, point_scores), [(3, "e4")])
+    result = metric.compute()
+    assert result["Piece_EndToEnd_Incorrect_Squares"] == 1  # Rejecting the d5 phantom still misses e4.
+    assert result["Piece_EndToEnd_Relaxed_Incorrect_Squares"] == 0
+    assert result["Piece_EndToEnd_Relaxed_Threshold"] == pytest.approx(0.9)
+    assert not metric.greater_component_is_better["Piece_EndToEnd_Relaxed_Incorrect_Squares"]
+    assert list(result) == metric.component_names
+
+
+@pytest.mark.parametrize("board_score", [0.9, 0.01])
+def test_relaxed_end_to_end_equals_strict_for_an_upright_or_missing_board(board_score):
+    metric = make_metric()
+    update(metric, raw_outputs(board_score=board_score, pieces=[(3, 0.9, "e4"), (2, 0.4, "g1")]), [(3, "e4"), (1, "g1")])
+    result = metric.compute()
+    assert result["Piece_EndToEnd_Relaxed_Incorrect_Squares"] == result["Piece_EndToEnd_Incorrect_Squares"]
+    assert result["Piece_EndToEnd_Relaxed_Threshold"] == result["Piece_EndToEnd_Threshold"]
+
+
 def test_sweep_matches_brute_force_including_ties_wrong_classes_and_failures():
     rng = np.random.default_rng(17)
     for _ in range(50):
@@ -303,6 +326,7 @@ def test_distributed_states_produce_global_ap_color_and_threshold(monkeypatch):
             "piece_confusions",
             "piece_color_counts",
             "piece_end_to_end_frames",
+            "piece_end_to_end_relaxed_frames",
         )
     )
 
