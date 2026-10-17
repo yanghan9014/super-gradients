@@ -13,9 +13,10 @@ cosine_final_lr_ratio: 0.05
 
 zero_weight_decay_on_bias_and_bn: True
 batch_accumulate: 1
+normalize_accumulated_gradients: True
 
 average_best_models: True
-save_ckpt_epoch_list: [300, 500]
+save_ckpt_epoch_list: [300, 500, 600, 700, 800, 900, 1000]
 
 loss: chess_yolo_nas_pose_loss
 
@@ -41,8 +42,10 @@ criterion_params:
     bbox_assigned_alpha: 1.0
     bbox_assigned_beta: 6.0
     # From this epoch on, a board scored 180 degrees out is accepted as correct.
-    rotation_invariant_start_epoch: 5000
-    # board_localization_loss_multiplier: 5.0
+    rotation_invariant_start_epoch: 0
+    rotation_invariant_max_pieces: 6
+    board_localization_loss_multiplier: 2.0
+    log_pose_diagnostics: True
 
 optimizer: AdamW
 optimizer_params:

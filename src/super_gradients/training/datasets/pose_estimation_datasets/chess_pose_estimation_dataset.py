@@ -116,6 +116,7 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         self.non_empty_annotation_indexes = np.argwhere([len(ann.ann_keypoints) > 0 for ann in self.annotations]).flatten()
         self.include_empty_samples = include_empty_samples
         self.transforms.preserve_out_of_frame_board_annotations = preserve_out_of_frame_board_annotations
+        self.board_piece_counts = [_count_on_board_pieces(ann, board_class_id) for ann in self.annotations]
 
     def __len__(self):
         if self.include_empty_samples:
@@ -162,7 +163,8 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
         mask = np.ones(image_shape, dtype=np.uint8)
 
         return ChessPoseEstimationSample(
-            image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, labels=gt_class_id, bboxes_xywh=gt_bboxes_xywh, additional_samples=None
+            image=orig_image, mask=mask, joints=gt_joints, areas=gt_areas, labels=gt_class_id, bboxes_xywh=gt_bboxes_xywh,
+            additional_samples=None, board_piece_counts=self.board_piece_counts[index].copy(),
         )
 
     def _read_image(self, ann) -> Tuple[np.ndarray, Tuple[float, float]]:
@@ -234,6 +236,41 @@ class ChessPoseEstimationDataset(AbstractPoseEstimationDataset):
             keypoint_colors=self.keypoint_colors,
         )
         return params
+
+
+def _count_on_board_pieces(ann, board_class_id: int) -> np.ndarray:
+    """Count original annotated piece centres inside the board, before any crop/filter.
+
+    Missing/degenerate board geometry or unlocatable pieces leave the count unknown
+    (-1), so orientation stays strict. Captured pieces outside the board do not count.
+    """
+    from super_gradients.training.metrics.board_homography_metrics import _fit_homography, _project
+
+    labels = np.asarray(ann.ann_class_labels).reshape(-1)
+    counts = np.full(len(labels), -1, dtype=np.int64)
+    boards = np.flatnonzero(labels == board_class_id)
+    if len(boards) != 1:
+        return counts
+    landmarks = ann.ann_keypoints[boards[0]]
+    usable = (landmarks[:, 2] > 0) & np.isfinite(landmarks[:, :2]).all(axis=-1)
+    homography = _fit_homography(landmarks[:, :2], usable, method=0)
+    if homography is None:
+        return counts
+    # Reject inconsistent geometry rather than turning a bad fit into a small count.
+    from super_gradients.training.metrics.board_homography_metrics import BOARD_REFERENCE_POINTS
+    fitted = _project(landmarks[usable, :2], homography)
+    if fitted is None or np.max(np.abs(fitted - BOARD_REFERENCE_POINTS[usable])) > 0.25:
+        return counts
+    pieces = ann.ann_keypoints[labels != board_class_id, 0]
+    if len(pieces) == 0:
+        counts[boards[0]] = 0
+        return counts
+    if not ((pieces[:, 2] > 0) & np.isfinite(pieces[:, :2]).all(axis=-1)).all():
+        return counts
+    centres = _project(pieces[:, :2], homography)
+    if centres is not None:
+        counts[boards[0]] = int(((centres >= -1e-6) & (centres <= 8 + 1e-6)).all(axis=-1).sum())
+    return counts
 
 
 def _set_board_relative_piece_boxes(ann, squares: float, board_class_id: int) -> None:

@@ -245,6 +245,12 @@ class Trainer:
             num_gpus=core_utils.get_param(cfg, "num_gpus"),
         )
 
+        memory_fraction = core_utils.get_param(cfg, "cuda_memory_fraction")
+        if memory_fraction is not None:
+            if not 0 < memory_fraction <= 1:
+                raise ValueError("cuda_memory_fraction must be in (0, 1]")
+            torch.cuda.set_per_process_memory_fraction(memory_fraction)
+
         # Create resolved config before instantiation
         recipe_logged_cfg = {"recipe_config": OmegaConf.to_container(cfg, resolve=True)}
 
@@ -255,6 +261,13 @@ class Trainer:
         cfg = cls._trigger_cfg_modifying_callbacks(cfg)
 
         trainer = Trainer(experiment_name=cfg.experiment_name, ckpt_root_dir=cfg.ckpt_root_dir)
+
+        # Seed before random head initialization as well as before training.
+        random_seed(
+            is_ddp=device_config.multi_gpu == MultiGPUMode.DISTRIBUTED_DATA_PARALLEL,
+            device=device_config.device,
+            seed=get_param(cfg.training_hyperparams, "seed", 42),
+        )
 
         # BUILD NETWORK
         model = models.get(
@@ -618,6 +631,15 @@ class Trainer:
         :param context: current phase context
         :return:
         """
+        # Opt-in mean accumulation for small-memory training. Normalize the final
+        # partial window by its actual length and flush it before the epoch ends.
+        normalize = get_param(self.training_params, "normalize_accumulated_gradients", False)
+        num_batches = len(self.train_loader) if self.max_train_batches is None else self.max_train_batches
+        if normalize:
+            window_start = (batch_idx // self.batch_accumulate) * self.batch_accumulate
+            window_size = min(self.batch_accumulate, num_batches - window_start)
+            loss = loss / window_size
+
         # SCALER IS ENABLED ONLY IF self.training_params.mixed_precision=True
         self.scaler.scale(loss).backward()
         self.phase_callback_handler.on_train_batch_backward_end(context)
@@ -627,7 +649,8 @@ class Trainer:
         global_step = local_step + len(self.train_loader) * epoch
         total_steps = len(self.train_loader) * self.max_epochs
 
-        if global_step % self.batch_accumulate == 0:
+        should_step = (local_step % self.batch_accumulate == 0 or local_step == num_batches) if normalize else global_step % self.batch_accumulate == 0
+        if should_step:
             self.phase_callback_handler.on_train_batch_gradient_step_start(context)
 
             # APPLY GRADIENT CLIPPING IF REQUIRED
@@ -1308,6 +1331,9 @@ class Trainer:
         if self.ema:
             self.ema_model = self._instantiate_ema_model(self.training_params.ema_params)
             self.ema_model.updates = self.start_epoch * num_batches // self.batch_accumulate
+            if get_param(self.training_params, "normalize_accumulated_gradients", False):
+                effective_batches = min(num_batches, get_param(self.training_params, "max_train_batches") or num_batches)
+                self.ema_model.updates = self.start_epoch * ((effective_batches + self.batch_accumulate - 1) // self.batch_accumulate)
             if self.load_checkpoint:
                 if "ema_net" in self.checkpoint.keys():
                     self.ema_model.ema.load_state_dict(self.checkpoint["ema_net"])

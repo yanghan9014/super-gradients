@@ -39,12 +39,30 @@ class YoloNASPoseBoxesAssignmentResult:
     assigned_scores: Tensor
     assigned_gt_index: Tensor
     assigned_crowd: Tensor
+    assigned_rotation_eligible: Optional[Tensor] = None
 
 
 # Board keypoint order is (a1, a8, h1, h8, center, a45, h45, 1de, 8de). Rotating the board 180
 # degrees relabels a1<->h8, a8<->h1, a45<->h45 and 1de<->8de, leaving the center where it is. This
 # is the only relabelling that keeps square colours consistent, since a1 must sit on a dark square.
 BOARD_180_PERMUTATION = [3, 2, 1, 0, 4, 6, 5, 8, 7]
+
+
+@torch.no_grad()
+def board_rotation_choice(predicted_coords: Tensor, target_coords: Tensor, target_visibility: Tensor) -> Tensor:
+    """One complete board permutation, shared by assignment and regression.
+
+    Leading dimensions broadcast. Masked MSE avoids arbitrary ties when both OKS
+    values saturate near zero early in training. Ties retain canonical orientation.
+    """
+    permutation = torch.as_tensor(BOARD_180_PERMUTATION, device=target_coords.device)
+
+    def distance(coords, visibility):
+        mask = (visibility > 0).float()
+        squared = ((predicted_coords.float() - coords.float()) ** 2).sum(-1, keepdim=True)
+        return (squared * mask).sum(dim=(-2, -1)) / mask.sum(dim=(-2, -1)).clamp(min=1)
+
+    return distance(target_coords[..., permutation, :], target_visibility[..., permutation, :]) < distance(target_coords, target_visibility)
 
 
 def batch_pose_oks(
@@ -56,6 +74,7 @@ def batch_pose_oks(
     gt_labels: Optional[torch.Tensor] = None,
     board_class_id: int = 12,
     piece_sigma: Optional[torch.Tensor] = None,
+    rotation_eligible: Optional[Tensor] = None,
 ) -> Tensor:
     """
     Calculate batched OKS (Object Keypoint Similarity) between two sets of keypoints.
@@ -106,6 +125,21 @@ def batch_pose_oks(
     num_visible_joints = joints1_visiblity.sum(dim=-1, keepdim=False)  # [N, M1, M2]
     mean_oks = (oks * joints1_visiblity).sum(dim=-1, keepdim=False) / (num_visible_joints + eps)  # [N, M1, M2]
 
+    if rotation_eligible is not None and rotation_eligible.any():
+        eligible = rotation_eligible.squeeze(-1).bool()
+        if gt_labels is not None:
+            eligible = eligible & (gt_labels.squeeze(-1) == board_class_id)
+        batch_ids = eligible.nonzero(as_tuple=True)[0]
+        known = gt_keypoints[eligible]
+        pred = pred_keypoints[batch_ids]
+        rotated = board_rotation_choice(pred, known[:, None, :, :2], known[:, None, :, 2:3])
+        perm = torch.as_tensor(BOARD_180_PERMUTATION, device=known.device)
+        chosen = torch.where(rotated[..., None, None], known[:, None, perm], known[:, None])
+        distance = ((pred.float() - chosen[..., :2].float()) ** 2).sum(-1)
+        selected_area = area[eligible].reshape(-1, 1, 1)
+        exponent = distance / (2 * sigmas.reshape(1, 1, -1)) ** 2 / (selected_area + eps) / 2
+        mask = (chosen[..., 2] > 0).float()
+        mean_oks[eligible] = (torch.exp(-exponent) * mask).sum(-1) / (mask.sum(-1) + eps)
     return mean_oks
 
 
@@ -152,6 +186,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         gt_crowd: Tensor,
         pad_gt_mask: Tensor,
         bg_index: int,
+        rotation_eligible: Optional[Tensor] = None,
     ) -> YoloNASPoseBoxesAssignmentResult:
         """
         This code is based on https://github.com/fcjian/TOOD/blob/master/mmdet/core/bbox/assigners/task_aligned_assigner.py
@@ -209,7 +244,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
         ious = batch_iou_similarity(gt_bboxes, pred_bboxes)
 
         if self.multiply_by_pose_oks:
-            pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device), eps=self.eps, gt_labels=gt_labels, board_class_id=self.board_class_id, piece_sigma=self.piece_sigma.to(pred_pose_coords.device) if self.piece_sigma is not None else None)
+            pose_oks = batch_pose_oks(gt_poses, pred_pose_coords, gt_bboxes, self.sigmas.to(pred_pose_coords.device), eps=self.eps, gt_labels=gt_labels, board_class_id=self.board_class_id, piece_sigma=self.piece_sigma.to(pred_pose_coords.device) if self.piece_sigma is not None else None, rotation_eligible=rotation_eligible)
             ious = ious * pose_oks
 
         # # gather pred bboxes class score
@@ -287,6 +322,7 @@ class YoloNASPoseTaskAlignedAssigner(nn.Module):
             assigned_poses=assigned_poses,
             assigned_gt_index=assigned_gt_index,
             assigned_crowd=assigned_crowd,
+            assigned_rotation_eligible=(rotation_eligible.reshape(-1)[assigned_gt_index].bool() if rotation_eligible is not None else None),
         )
 
 
@@ -354,6 +390,8 @@ class ChessYoloNASPoseLoss(nn.Module):
         board_localization_loss_multiplier: float = 1.0,
         rotation_invariant_start_epoch: Optional[int] = None,
         ignore_unannotated_board_keypoints: bool = False,
+        rotation_invariant_max_pieces: Optional[int] = None,
+        log_pose_diagnostics: bool = False,
     ):
         """
         :param oks_sigmas:                 OKS sigmas for pose estimation. Array of [Num Keypoints].
@@ -368,6 +406,9 @@ class ChessYoloNASPoseLoss(nn.Module):
                                            See _resolve_board_orientation.
         :param ignore_unannotated_board_keypoints: Ignore missing board landmarks in confidence loss, rather than
                                                    treating absent annotations as negative targets. Enabled by the chess recipe.
+        :param rotation_invariant_max_pieces: Inclusive original on-board annotation count; unknown counts stay strict.
+                                             None accepts every board once the start epoch is reached.
+        :param log_pose_diagnostics: Log weighted board/piece contributions and rotation fractions without changing metrics.
         :param average_losses_in_ddp:      Whether to average losses in DDP mode. In theory, enabling this option
                                            should have the positive impact on model accuracy since it would smooth out
                                            influence of batches with small number of objects.
@@ -408,6 +449,15 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.ignore_unannotated_board_keypoints = ignore_unannotated_board_keypoints
         # Kept up to date by ChessBoardRotationInvarianceCallback.
         self.current_epoch = 0
+        if rotation_invariant_max_pieces is not None and (
+            isinstance(rotation_invariant_max_pieces, bool) or not isinstance(rotation_invariant_max_pieces, int) or rotation_invariant_max_pieces < 0
+        ):
+            raise ValueError("rotation_invariant_max_pieces must be a nonnegative integer or None")
+        if rotation_invariant_max_pieces is not None and self.num_keypoints != 9:
+            raise ValueError("Conditional board rotation requires nine board keypoints")
+        self.rotation_invariant_max_pieces = rotation_invariant_max_pieces
+        self.log_pose_diagnostics = log_pose_diagnostics
+        self._pose_diagnostics = {}
 
     @torch.no_grad()
     def _unpack_flat_targets(self, targets: Tuple[Tensor, ...], batch_size: int) -> Mapping[str, torch.Tensor]:
@@ -415,16 +465,17 @@ class ChessYoloNASPoseLoss(nn.Module):
         Convert targets to PPYoloE-compatible format since it's the easiest (not the cleanest) way to
         have PP Yolo training & metrics computed
 
-        :param targets: Tuple (boxes, joints, class_labels)
+        :param targets: Tuple (boxes, joints, class_labels[, board_piece_counts])
                         - boxes: [N, 5] (batch_index, x1, y1, x2, y2)
                         - joints: [N, num_joints, 4] (batch_index, x, y, visibility)
                         - class_labels: [N, 2] (batch_index, class_id)
+                        - board_piece_counts: optional [N, 2] (batch_index, original count or -1 if unknown)
         :return:        (Dictionary [str,Tensor]) with keys:
                         - gt_class: (Tensor, int64|int32): Label of gt_bboxes, shape(B, n, 1)
                         - gt_bbox: (Tensor, float32): Ground truth bboxes, shape(B, n, 4) in XYXY format
                         - pad_gt_mask (Tensor, float32): 1 means bbox, 0 means no bbox, shape(B, n, 1)
         """
-        target_boxes, target_joints, target_class_labels = targets
+        target_boxes, target_joints, target_class_labels = targets[:3]
 
         image_index = target_boxes[:, 0].long()
         # A single device sync for the padded size, instead of several per image.
@@ -441,12 +492,15 @@ class ChessYoloNASPoseLoss(nn.Module):
             return result
 
         gt_bbox = padded(target_boxes[:, 1:5], target_boxes.dtype)
-        return {
+        result = {
             "gt_class": padded(target_class_labels[:, 1:], torch.long),
             "gt_bbox": gt_bbox,
             "pad_gt_mask": gt_bbox.sum(dim=-1, keepdim=True) > 0,
             "gt_poses": padded(target_joints[..., 1:], target_joints.dtype),
         }
+        if len(targets) > 3:
+            result["board_piece_counts"] = padded(targets[3][:, 1:], torch.long)
+        return result
 
     def forward(
         self,
@@ -487,6 +541,12 @@ class ChessYoloNASPoseLoss(nn.Module):
         pad_gt_mask = targets["pad_gt_mask"]
         gt_crowd = torch.zeros_like(pad_gt_mask, dtype=torch.bool)
 
+        rotation_eligible = self._rotation_eligibility(targets)
+        board_gt = (gt_labels == self.board_class_id) & pad_gt_mask.bool()
+        self._pose_diagnostics = {
+            "rotation_eligible_fraction": rotation_eligible.float().sum() / board_gt.sum().clamp(min=1),
+        }
+
         # label assignment
         assign_result = self.assigner(
             pred_scores=pred_scores.detach().sigmoid(),  # Pred scores are logits on training for numerical stability
@@ -499,15 +559,18 @@ class ChessYoloNASPoseLoss(nn.Module):
             gt_crowd=gt_crowd,
             pad_gt_mask=pad_gt_mask,
             bg_index=self.num_classes,
+            rotation_eligible=rotation_eligible,
         )
 
         assigned_scores = assign_result.assigned_scores
 
         # cls loss
         if self.classification_loss_type == "focal":
-            loss_cls = self._focal_loss(pred_scores, assigned_scores, alpha=-1)
+            cls_unreduced = self._focal_loss(pred_scores, assigned_scores, alpha=-1, reduction="none")
+            loss_cls = cls_unreduced.sum()
         elif self.classification_loss_type == "bce":
-            loss_cls = torch.nn.functional.binary_cross_entropy_with_logits(pred_scores, assigned_scores, reduction="sum")
+            cls_unreduced = torch.nn.functional.binary_cross_entropy_with_logits(pred_scores, assigned_scores, reduction="none")
+            loss_cls = cls_unreduced.sum()
         else:
             raise ValueError(f"Unknown classification loss type: {self.classification_loss_type}")
 
@@ -517,6 +580,10 @@ class ChessYoloNASPoseLoss(nn.Module):
             assigned_scores_sum /= get_world_size()
         assigned_scores_sum = torch.clip(assigned_scores_sum, min=1.0)
         loss_cls /= assigned_scores_sum
+        if self.log_pose_diagnostics:
+            by_class = cls_unreduced.sum(dim=(0, 1)) / assigned_scores_sum * self.classification_loss_weight
+            self._pose_diagnostics["board_loss_cls"] = by_class[self.board_class_id]
+            self._pose_diagnostics["piece_loss_cls"] = by_class.sum() - by_class[self.board_class_id]
 
         loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg = self._bbox_loss(
             pred_distri,
@@ -548,11 +615,29 @@ class ChessYoloNASPoseLoss(nn.Module):
             ]
         )
 
+        if self.log_pose_diagnostics:
+            extra = [self._pose_diagnostics.get(name, loss.detach().new_zeros(())) for name in self.component_names[6:]]
+            log_losses = torch.cat([log_losses, torch.stack(extra).detach()])
         return loss, log_losses
 
     @property
     def component_names(self):
-        return ["loss_cls", "loss_iou", "loss_dfl", "loss_pose_cls", "loss_pose_reg", "loss"]
+        names = ["loss_cls", "loss_iou", "loss_dfl", "loss_pose_cls", "loss_pose_reg", "loss"]
+        if self.log_pose_diagnostics:
+            names += [f"{group}_loss_{term}" for group in ("board", "piece") for term in ("cls", "iou", "dfl", "pose_cls", "pose_reg")]
+            names += ["rotation_eligible_fraction", "rotation_flipped_assigned_fraction"]
+        return names
+
+    def _rotation_eligibility(self, targets):
+        boards = (targets["gt_class"] == self.board_class_id) & targets["pad_gt_mask"].bool()
+        if self.rotation_invariant_start_epoch is None or self.current_epoch < self.rotation_invariant_start_epoch:
+            return torch.zeros_like(boards)
+        if self.rotation_invariant_max_pieces is None:
+            return boards
+        counts = targets.get("board_piece_counts")
+        if counts is None:
+            raise ValueError("Conditional rotation requires original board piece counts from ChessYoloNASPoseCollateFN")
+        return boards & (counts >= 0) & (counts <= self.rotation_invariant_max_pieces)
 
     def _df_loss(self, pred_dist: Tensor, target: Tensor) -> Tensor:
         target_left = target.long()
@@ -589,22 +674,10 @@ class ChessYoloNASPoseLoss(nn.Module):
             return target_coords, target_visibility
 
         permutation = torch.as_tensor(BOARD_180_PERMUTATION, device=target_coords.device)
-        rotated_coords = target_coords[:, permutation]
-        rotated_visibility = target_visibility[:, permutation]
-
-        # Selected on plain squared distance rather than the OKS-shaped regression loss, which
-        # saturates towards 1 and would read as a near-tie whenever both labellings score badly.
-        def mean_squared_distance(coords: Tensor, visibility: Tensor) -> Tensor:
-            visible = (visibility > 0).float()
-            distance = ((predicted_coords - coords) ** 2).sum(dim=-1, keepdim=True)
-            return (distance * visible).sum(dim=1) / (visible.sum(dim=1) + 1e-9)
-
-        use_rotated = mean_squared_distance(rotated_coords, rotated_visibility) < mean_squared_distance(target_coords, target_visibility)
-        use_rotated = use_rotated.unsqueeze(-1)  # [Num Instances, 1, 1], to broadcast over joints
-
+        use_rotated = board_rotation_choice(predicted_coords, target_coords, target_visibility)[..., None, None]
         return (
-            torch.where(use_rotated, rotated_coords, target_coords),
-            torch.where(use_rotated, rotated_visibility, target_visibility),
+            torch.where(use_rotated, target_coords[:, permutation], target_coords),
+            torch.where(use_rotated, target_visibility[:, permutation], target_visibility),
         )
 
     def _keypoint_loss(
@@ -714,7 +787,12 @@ class ChessYoloNASPoseLoss(nn.Module):
                 iou_loss_raw = self.iou_loss(pred_bboxes_pos, assigned_bboxes_pos)
                 if iou_loss_raw.dim() == 1 and bbox_weight.dim() == 2:
                     iou_loss_raw = iou_loss_raw.unsqueeze(-1)
-                loss_iou = (iou_loss_raw * bbox_weight * localization_multiplier).sum() / assigned_scores_sum
+                iou_terms = iou_loss_raw * bbox_weight * localization_multiplier / assigned_scores_sum
+                loss_iou = iou_terms.sum()
+                if self.log_pose_diagnostics:
+                    board = assigned_labels_pos == self.board_class_id
+                    self._pose_diagnostics["board_loss_iou"] = iou_terms[board].sum() * self.iou_loss_weight
+                    self._pose_diagnostics["piece_loss_iou"] = iou_terms[~board].sum() * self.iou_loss_weight
             else:
                 loss_iou = torch.zeros([], device=pred_bboxes.device)
 
@@ -727,7 +805,12 @@ class ChessYoloNASPoseLoss(nn.Module):
                 dfl_loss_raw = self._df_loss(pred_dist_pos, assigned_ltrb_pos)
                 if dfl_loss_raw.dim() == 1 and bbox_weight.dim() == 2:
                     dfl_loss_raw = dfl_loss_raw.unsqueeze(-1)
-                loss_dfl = (dfl_loss_raw * bbox_weight * localization_multiplier).sum() / assigned_scores_sum
+                dfl_terms = dfl_loss_raw * bbox_weight * localization_multiplier / assigned_scores_sum
+                loss_dfl = dfl_terms.sum()
+                if self.log_pose_diagnostics:
+                    board = assigned_labels_pos == self.board_class_id
+                    self._pose_diagnostics["board_loss_dfl"] = dfl_terms[board].sum() * self.dfl_loss_weight
+                    self._pose_diagnostics["piece_loss_dfl"] = dfl_terms[~board].sum() * self.dfl_loss_weight
             else:
                 loss_dfl = torch.zeros([], device=pred_bboxes.device)
 
@@ -755,12 +838,19 @@ class ChessYoloNASPoseLoss(nn.Module):
                 if mask_board.any():
                     board_target_coords = gt_pose_coords[mask_board]
                     board_target_visibility = gt_pose_visibility[mask_board]
-                    if self.rotation_invariant_start_epoch is not None and self.current_epoch >= self.rotation_invariant_start_epoch:
-                        board_target_coords, board_target_visibility = self._resolve_board_orientation(
-                            predicted_coords=pred_pose_coords[mask_board],
-                            target_coords=board_target_coords,
-                            target_visibility=board_target_visibility,
-                        )
+                    eligible = assign_result.assigned_rotation_eligible
+                    if eligible is None:
+                        active = self.rotation_invariant_start_epoch is not None and self.current_epoch >= self.rotation_invariant_start_epoch
+                        board_eligible = torch.full_like(mask_board[mask_board], active and self.rotation_invariant_max_pieces is None)
+                    else:
+                        board_eligible = eligible[mask_positive][mask_board]
+                    flipped = torch.zeros_like(board_eligible)
+                    if board_eligible.any():
+                        flipped = board_eligible & board_rotation_choice(pred_pose_coords[mask_board], board_target_coords, board_target_visibility)
+                        perm = torch.as_tensor(BOARD_180_PERMUTATION, device=board_target_coords.device)
+                        board_target_coords = torch.where(flipped[:, None, None], board_target_coords[:, perm], board_target_coords)
+                        board_target_visibility = torch.where(flipped[:, None, None], board_target_visibility[:, perm], board_target_visibility)
+                    self._pose_diagnostics["rotation_flipped_assigned_fraction"] = flipped.float().sum() / board_eligible.sum().clamp(min=1)
 
                     reg_b, cls_b = self._keypoint_loss(
                         predicted_coords=pred_pose_coords[mask_board],
@@ -794,6 +884,15 @@ class ChessYoloNASPoseLoss(nn.Module):
                     total_instances = len(assigned_labels_pos)
                     loss_pose_reg = (reg_b * mask_board.sum() * self.board_localization_loss_multiplier + reg_p * mask_pieces.sum()) / total_instances
                     loss_pose_cls = (cls_b * mask_board.sum() + cls_p * mask_pieces.sum()) / total_instances
+
+                if self.log_pose_diagnostics:
+                    for group, reg, cls, mask, multiplier in (
+                        ("board", reg_b, cls_b, mask_board, self.board_localization_loss_multiplier),
+                        ("piece", reg_p, cls_p, mask_pieces, 1.0),
+                    ):
+                        fraction = 1.0 if self.rescale_pose_loss_with_assigned_score else mask.sum() / len(assigned_labels_pos)
+                        self._pose_diagnostics[group + "_loss_pose_reg"] = torch.as_tensor(reg, device=pred_bboxes.device) * fraction * multiplier * self.pose_reg_loss_weight
+                        self._pose_diagnostics[group + "_loss_pose_cls"] = torch.as_tensor(cls, device=pred_bboxes.device) * fraction * self.pose_cls_loss_weight
 
             else:
                 loss_pose_reg, loss_pose_cls = self._keypoint_loss(

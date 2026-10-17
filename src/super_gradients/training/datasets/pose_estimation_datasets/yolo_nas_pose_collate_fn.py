@@ -90,6 +90,10 @@ class YoloNASPoseCollateFN:
 
 @register_collate_function()
 class ChessYoloNASPoseCollateFN(YoloNASPoseCollateFN):
+    def __init__(self, set_image_to_none=True, include_board_piece_counts=False):
+        super().__init__(set_image_to_none=set_image_to_none)
+        self.include_board_piece_counts = include_board_piece_counts
+
     def __call__(self, batch: List[PoseEstimationSample]) -> Tuple[Tensor, Tuple[Tensor, Tensor, Tensor], Dict]:
         """
         Collate samples into a batch, returning class labels instead of crowd flags.
@@ -98,12 +102,18 @@ class ChessYoloNASPoseCollateFN(YoloNASPoseCollateFN):
         all_boxes: List[Tensor] = []
         all_joints: List[Tensor] = []
         all_class_labels: List[Tensor] = []
+        all_board_piece_counts: List[Tensor] = []
 
         for sample in batch:
             boxes, joints, class_labels = self._get_targets(sample)
             all_boxes.append(boxes)
             all_joints.append(joints)
             all_class_labels.append(class_labels)
+            if self.include_board_piece_counts:
+                counts = getattr(sample, "board_piece_counts", None)
+                if counts is None:
+                    counts = np.full(len(class_labels), -1, dtype=np.int64)
+                all_board_piece_counts.append(torch.as_tensor(counts, dtype=torch.long).reshape(-1, 1))
 
             sample.image = torch.from_numpy(np.transpose(sample.image, [2, 0, 1]))
             sample.mask = torch.from_numpy(sample.mask)
@@ -120,7 +130,10 @@ class ChessYoloNASPoseCollateFN(YoloNASPoseCollateFN):
         joints = flat_collate_tensors_with_batch_index(all_joints)
         class_labels = flat_collate_tensors_with_batch_index(all_class_labels)
         extras = {"gt_samples": batch}
-        return all_images, (boxes, joints, class_labels), extras
+        targets = (boxes, joints, class_labels)
+        if self.include_board_piece_counts:
+            targets += (flat_collate_tensors_with_batch_index(all_board_piece_counts),)
+        return all_images, targets, extras
 
     def _get_targets(self, sample: PoseEstimationSample) -> Tuple[Tensor, Tensor, Tensor]:
         """

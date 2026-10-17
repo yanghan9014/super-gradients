@@ -128,7 +128,9 @@ train_dataloader_params:
   drop_last: True
   pin_memory: True
   persistent_workers: True
-  collate_fn: ChessYoloNASPoseCollateFN
+  collate_fn:
+    ChessYoloNASPoseCollateFN:
+      include_board_piece_counts: True
 
 val_dataloader_params:
   dataset: ChessPoseEstimationDataset
@@ -137,4 +139,6 @@ val_dataloader_params:
   drop_last: False
   pin_memory: True
   persistent_workers: True
-  collate_fn: ChessYoloNASPoseCollateFN
+  collate_fn:
+    ChessYoloNASPoseCollateFN:
+      include_board_piece_counts: True

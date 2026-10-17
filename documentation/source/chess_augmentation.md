@@ -61,8 +61,7 @@ confidence loss is averaged over known landmarks only, matching coordinate regre
 A board with no known landmarks contributes zero to both pose terms. Known board
 landmarks are positive confidence targets regardless of physical visibility or image
 boundaries; confidence is therefore not a physical-visibility label. Missing board
-landmarks produce no coordinate or confidence gradient. Piece loss behavior, loss
-weights, assignment and rotation-invariance settings are unchanged. Direct loss callers
+landmarks produce no coordinate or confidence gradient. Direct loss callers
 default to the old confidence policy unless they enable the new option.
 
 The existing head already predicts unrestricted coordinate offsets; only confidence
@@ -72,6 +71,43 @@ architecture change. Their accuracy still depends on image context and annotatio
 Use a new run with the updated code and resolved recipe for this supervision change.
 Reproducing an older run requires its original SuperGradients revision as well as its
 saved configuration; the earlier preservation flag had different final-canvas semantics.
+
+## Conditional orientation and board weighting
+
+The current recipe sets `board_localization_loss_multiplier: 2.0`. This multiplies
+only board box IoU, box DFL and keypoint regression, leaving the underlying scalar
+weights, detection classification, pose confidence and piece losses unchanged.
+
+`rotation_invariant_start_epoch: 0` and `rotation_invariant_max_pieces: 6` accept
+either complete 180-degree board labelling from the first epoch, only when the
+original annotation has at most six on-board pieces. The count is computed in
+annotation coordinates using the board homography, before augmentation. Off-board
+pieces do not count. Missing/degenerate or inconsistent geometry gives an unknown
+count and strict orientation. Cropping/filtering preserves the original count.
+The collator carries it in an optional fourth target tensor; it does not change
+the canonical `gt_samples` used by validation metrics.
+
+Assignment OKS and pose regression use the same masked-MSE whole-board orientation
+choice for eligible targets. Coordinates and known-point masks are permuted together;
+ties retain the annotated orientation. More than six pieces always remain strict.
+Missing count metadata is an error when conditional rotation is enabled. The threshold
+is configurable; `None` retains the legacy unconditional eligibility rule.
+
+`log_pose_diagnostics: True` adds board/piece contributions for all five loss terms.
+Each pair sums to its existing aggregate term after weights and normalization.
+`rotation_eligible_fraction` is the per-batch fraction of GT boards eligible for
+relaxation; `rotation_flipped_assigned_fraction` is the fraction of eligible matched
+board anchors that chose the flipped labelling. These are loss diagnostics, not new
+validation metrics. Checkpoints are retained at 300 and every 100 epochs from 500
+through 1000. Model initialization is seeded before constructing its random heads.
+
+For constrained GPU memory, `normalize_accumulated_gradients: True` averages each
+accumulation window and flushes a partial final window at the epoch boundary.
+The default generic recipe keeps legacy summed accumulation; the chess recipe opts
+into averaging (identical when `batch_accumulate: 1`). A smaller physical batch still
+changes batch-normalization statistics and is not exactly equivalent to a large batch.
+An optional top-level `cuda_memory_fraction` caps the process's PyTorch CUDA allocator;
+other CUDA allocations and other processes still need separate free-memory monitoring.
 
 Every configured image padding/fill value is zero. Random square masking is removed.
 Appearance effects run before the geometry warp adds padding, so they cannot brighten it.
