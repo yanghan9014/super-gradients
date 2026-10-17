@@ -120,6 +120,8 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         return float(np.clip(target, low, high))
 
     def apply_to_sample(self, sample: PoseEstimationSample) -> PoseEstimationSample:
+        if self.preserve_out_of_frame_board_annotations:
+            sample.preserve_out_of_frame_board_annotations = True
         left, top, window_width = self.window(sample)
         scale = self.output_width / window_width
         if self.defer_crop:
@@ -146,9 +148,9 @@ class KeypointsBoardFramedCrop(AbstractKeypointTransform):
         joints[:, :, 0] = (joints[:, :, 0] - left) * scale_x
         joints[:, :, 1] = (joints[:, :, 1] - top) * scale_y
         outside = (joints[:, :, 0] < 0) | (joints[:, :, 1] < 0) | (joints[:, :, 0] >= self.output_width) | (joints[:, :, 1] >= self.output_height)
-        if self.preserve_out_of_frame_board_annotations and sample.labels is not None:
-            # Geometry can bring known board points into the final canvas. It performs
-            # the final boundary check; piece annotations still require source evidence.
+        if sample.preserve_out_of_frame_board_annotations and sample.labels is not None:
+            # Known board coordinates remain supervised even beyond the final canvas.
+            # Piece annotations still require source evidence.
             outside &= (np.asarray(sample.labels).reshape(-1) != self.board_class_id)[:, None]
         joints[outside, 2] = 0
         sample.joints = joints

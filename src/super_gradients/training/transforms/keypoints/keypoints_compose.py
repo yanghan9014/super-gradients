@@ -51,16 +51,10 @@ class KeypointsCompose(AbstractKeypointTransform):
         :param sample: Input sample
         :return:       Transformed sample.
         """
-        # New chess recipes may infer annotated board geometry in padding. Preserve only
-        # known, finite board labels through the initial source-image boundary check.
-        board_flags = None
-        if self.preserve_out_of_frame_board_annotations and sample.labels is not None:
-            boards = np.asarray(sample.labels).reshape(-1) == 12
-            board_flags = sample.joints[boards, :, 2].copy()
-            board_flags[~np.isfinite(sample.joints[boards, :, :2]).all(axis=-1)] = 0
+        # Carry the policy through every transform's sanitize_sample call,
+        # including the final canvas check. Missing flags are never promoted.
+        sample.preserve_out_of_frame_board_annotations = self.preserve_out_of_frame_board_annotations
         sample = sample.sanitize_sample()
-        if board_flags is not None:
-            sample.joints[boards, :, 2] = board_flags
         sample = self._apply_transforms(sample, transforms=self.transforms, load_sample_fn=self.load_sample_fn)
         if self.preserve_out_of_frame_board_annotations:
             sample = sample.sanitize_sample()

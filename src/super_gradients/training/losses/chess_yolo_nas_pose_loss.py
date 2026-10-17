@@ -353,6 +353,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         board_class_id: int = 12,
         board_localization_loss_multiplier: float = 1.0,
         rotation_invariant_start_epoch: Optional[int] = None,
+        ignore_unannotated_board_keypoints: bool = False,
     ):
         """
         :param oks_sigmas:                 OKS sigmas for pose estimation. Array of [Num Keypoints].
@@ -365,6 +366,8 @@ class ChessYoloNASPoseLoss(nn.Module):
         :param pose_reg_loss_weight:       Pose regression loss weight
         :param rotation_invariant_start_epoch: Epoch from which either board labelling is accepted; None disables.
                                            See _resolve_board_orientation.
+        :param ignore_unannotated_board_keypoints: Ignore missing board landmarks in confidence loss, rather than
+                                                   treating absent annotations as negative targets. Enabled by the chess recipe.
         :param average_losses_in_ddp:      Whether to average losses in DDP mode. In theory, enabling this option
                                            should have the positive impact on model accuracy since it would smooth out
                                            influence of batches with small number of objects.
@@ -402,6 +405,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         self.rescale_pose_loss_with_assigned_score = rescale_pose_loss_with_assigned_score
         self.average_losses_in_ddp = average_losses_in_ddp
         self.rotation_invariant_start_epoch = rotation_invariant_start_epoch
+        self.ignore_unannotated_board_keypoints = ignore_unannotated_board_keypoints
         # Kept up to date by ChessBoardRotationInvarianceCallback.
         self.current_epoch = 0
 
@@ -613,6 +617,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         sigmas: Tensor,
         assigned_scores: Optional[Tensor] = None,
         assigned_scores_sum: Optional[Tensor] = None,
+        ignore_unannotated_keypoints: bool = False,
     ) -> Tuple[Tensor, Tensor]:
         """
 
@@ -622,6 +627,8 @@ class ChessYoloNASPoseLoss(nn.Module):
         :param target_visibility: [Num Instances, Num Joints, 1] - Visibility of each joint
         :param sigmas:            [Num Joints] - Sigma for each joint
         :param area:              [Num Instances, 1] - Area of the corresponding bounding box
+        :param ignore_unannotated_keypoints: If True, average confidence loss over annotated joints only.
+                                           Missing joints contribute zero to both pose losses.
         :return:                  Tuple of (regression loss, classification loss)
                                   - regression loss [Num Instances, 1]
                                   - classification loss [Num Instances, 1]
@@ -640,11 +647,19 @@ class ChessYoloNASPoseLoss(nn.Module):
         )  # [Num Instances, 1]
 
         if self.pose_classification_loss_type == "bce":
-            classification_loss = torch.nn.functional.binary_cross_entropy_with_logits(predicted_logits, visible_targets_mask, reduction="none").mean(dim=1)
+            classification_loss = torch.nn.functional.binary_cross_entropy_with_logits(predicted_logits, visible_targets_mask, reduction="none")
         elif self.pose_classification_loss_type == "focal":
-            classification_loss = self._focal_loss(predicted_logits, visible_targets_mask, alpha=0.25, gamma=2.0, reduction="none").mean(dim=1)
+            classification_loss = self._focal_loss(predicted_logits, visible_targets_mask, alpha=0.25, gamma=2.0, reduction="none")
         else:
             raise ValueError(f"Unsupported pose classification loss type {self.pose_classification_loss_type}")
+
+        if ignore_unannotated_keypoints:
+            # Board v=0 means unknown, not a negative visibility example. Match
+            # regression's per-instance mean over known landmarks. Empty masks
+            # produce exactly zero loss and zero confidence gradient.
+            classification_loss = (classification_loss * visible_targets_mask).sum(dim=1) / visible_targets_mask.sum(dim=1).clamp(min=1)
+        else:
+            classification_loss = classification_loss.mean(dim=1)
 
         if assigned_scores is None:
             classification_loss = classification_loss.mean()
@@ -752,6 +767,7 @@ class ChessYoloNASPoseLoss(nn.Module):
                         target_coords=board_target_coords,
                         predicted_logits=pred_pose_logits[mask_board],
                         target_visibility=board_target_visibility,
+                        ignore_unannotated_keypoints=self.ignore_unannotated_board_keypoints,
                         assigned_scores=bbox_weight[mask_board] if self.rescale_pose_loss_with_assigned_score else None,
                         assigned_scores_sum=assigned_scores_sum if self.rescale_pose_loss_with_assigned_score else None,
                         area=area[mask_board],

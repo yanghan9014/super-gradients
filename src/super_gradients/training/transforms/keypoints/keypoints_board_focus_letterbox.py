@@ -125,7 +125,8 @@ class KeypointsBoardFocusLetterbox(AbstractKeypointTransform):
 
     The app refuses to start until the board covers `min_board_fraction` of the frame, so photos with smaller
     boards are cropped to the board plus a margin (see board_focus_window) before letterboxing. Pieces outside
-    the crop are dropped. Board landmarks keep their coordinates and remain if they land on the canvas.
+    the crop are dropped. Board landmarks keep their coordinates; the sample's annotation policy
+    determines whether known coordinates outside the final canvas remain supervised.
     Must come first, on the source image: the window is chosen in source pixels.
     """
 

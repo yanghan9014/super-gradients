@@ -57,7 +57,8 @@ def test_known_off_photo_board_points_enter_padding_but_missing_points_and_off_p
     transform = KeypointsCompose([KeypointsLetterbox()], preserve_out_of_frame_board_annotations=True)
     result = transform.apply_to_sample(copy.deepcopy(source))
     np.testing.assert_allclose(result.joints[0, 0], [300, 50, 2])
-    assert result.joints[0, 1, 2] == result.joints[0, 2, 2] == result.joints[1, 0, 2] == 0
+    np.testing.assert_allclose(result.joints[0, 2], [300, -40, 2])
+    assert result.joints[0, 1, 2] == result.joints[1, 0, 2] == 0
     assert (result.image[50, 300] == 0).all()
     legacy = KeypointsCompose([KeypointsLetterbox()]).apply_to_sample(copy.deepcopy(source))
     assert legacy.joints[0, 0, 2] == 0  # Historical recipes keep their input-clipping policy.
@@ -100,12 +101,12 @@ def test_dataset_getitem_uses_new_annotation_policy(tmp_path):
 
     cv2.imwrite(str(tmp_path / "image.png"), np.full((1080, 1920, 3), 200, dtype=np.uint8))
     categories = [{"id": i, "name": str(i), "keypoints": ["p"] if i < 12 else [str(j) for j in range(9)]} for i in range(13)]
-    points = [900, -30, 2] + [0, 0, 0] * 8
+    points = [900, -30, 2, 900, -300, 2] + [0, 0, 0] * 7
     data = {
         "images": [{"id": 1, "file_name": "image.png", "width": 1920, "height": 1080}],
         "categories": categories,
         "annotations": [
-            {"id": 1, "image_id": 1, "category_id": 12, "bbox": [100, 100, 500, 500], "area": 250000, "keypoints": points, "num_keypoints": 1, "iscrowd": 0}
+            {"id": 1, "image_id": 1, "category_id": 12, "bbox": [100, 100, 500, 500], "area": 250000, "keypoints": points, "num_keypoints": 2, "iscrowd": 0}
         ],
     }
     (tmp_path / "annotations.json").write_text(json.dumps(data))
@@ -121,3 +122,5 @@ def test_dataset_getitem_uses_new_annotation_policy(tmp_path):
         preserve_out_of_frame_board_annotations=True,
     )
     np.testing.assert_allclose(dataset[0].joints[0, 0], [300, 50, 2])
+    np.testing.assert_allclose(dataset[0].joints[0, 1], [300, -40, 2])
+    assert (dataset[0].joints[0, 2:, 2] == 0).all()

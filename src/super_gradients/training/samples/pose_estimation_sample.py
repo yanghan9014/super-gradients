@@ -31,6 +31,8 @@ class PoseEstimationSample:
     :param pending_crop:       (Optional) (left, top, width, height) of an output window not yet cut from `image`, in image
                                pixels. Set by KeypointsBoardFramedCrop(defer_crop=True), whose annotations are already in
                                window coordinates; KeypointsBoardSafeGeometry cuts it in the same warp as its geometry.
+    :param preserve_out_of_frame_board_annotations: Keep finite board (class 12) annotation flags outside the image.
+                               Missing annotations stay missing. Other classes retain boundary masking.
     """
 
     image: Union[np.ndarray, torch.Tensor]
@@ -42,6 +44,9 @@ class PoseEstimationSample:
     labels: Optional[np.ndarray] = None
     additional_samples: Optional[List["PoseEstimationSample"]] = None
     pending_crop: Optional[Tuple[float, float, int, int]] = None
+    # Chess board flags denote known coordinates, including inferred off-image
+    # landmarks. Pieces and ordinary pose datasets retain image-boundary masking.
+    preserve_out_of_frame_board_annotations: bool = False
 
     @classmethod
     def compute_area_of_joints_bounding_box(cls, joints) -> np.ndarray:
@@ -67,7 +72,7 @@ class PoseEstimationSample:
         """
         Apply sanity checks on the pose sample, which includes:
         - Clamp bbox coordinates to ensure they are within image boundaries
-        - Update visibility status of keypoints if they are outside of image boundaries
+        - Mask keypoints outside image boundaries, except preserved board annotations
         - Update area if bbox clipping occurs
         This function does not remove instances, but may make them subject for removal instead.
         :return: self
@@ -81,6 +86,12 @@ class PoseEstimationSample:
         outside_bottom = self.joints[:, :, 1] >= image_height
 
         outside_image_mask = outside_left | outside_top | outside_right | outside_bottom
+        if self.preserve_out_of_frame_board_annotations and self.labels is not None:
+            boards = (np.asarray(self.labels).reshape(-1) == 12)[:, None]
+            outside_image_mask &= ~boards
+            invalid_board_points = boards & ~np.isfinite(self.joints[:, :, :2]).all(axis=-1)
+            outside_image_mask |= invalid_board_points
+            self.joints[invalid_board_points, :2] = 0
         self.joints[outside_image_mask, 2] = 0
 
         if self.bboxes_xywh is not None:

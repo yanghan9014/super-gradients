@@ -33,6 +33,8 @@ criterion_params:
     pose_cls_loss_weight: 1.0
     pose_reg_loss_weight: 34.0
     pose_classification_loss_type: focal
+    # Board flags mean annotated coordinates, not physical visibility.
+    ignore_unannotated_board_keypoints: True
     rescale_pose_loss_with_assigned_score: True
     assigner_multiply_by_pose_oks: True
     bbox_assigner_topk: 13

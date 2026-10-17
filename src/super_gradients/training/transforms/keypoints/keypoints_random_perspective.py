@@ -171,14 +171,8 @@ class KeypointsRandomPerspectiveTransform(AbstractKeypointTransform):
             transformed_xy = transformed_xy.reshape(keypoints_with_visibility.shape[0], keypoints_with_visibility.shape[1], 2)
             keypoints_with_visibility[:, :, 0:2] = transformed_xy
 
-            # Update visibility status of joints that were moved outside visible area
-            outside_left = keypoints_with_visibility[:, :, 0] < 0
-            outside_top = keypoints_with_visibility[:, :, 1] < 0
-            outside_right = keypoints_with_visibility[:, :, 0] >= width
-            outside_bottom = keypoints_with_visibility[:, :, 1] >= height
-            joints_outside_image = outside_left | outside_top | outside_right | outside_bottom
-            keypoints_with_visibility[joints_outside_image, 2] = 0
-
+            # The caller sanitizes after the warp, respecting the sample's
+            # annotation policy instead of erasing off-image board labels here.
             sample.joints = keypoints_with_visibility.astype(sample.joints.dtype, copy=False)
 
         # Apply to bboxes

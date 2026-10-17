@@ -119,7 +119,8 @@ class KeypointsRandomAffineTransform(AbstractKeypointTransform):
                 sample.mask, mat_output, interpolation=cv2.INTER_NEAREST, padding_value=self.mask_pad_value, padding_mode=cv2.BORDER_CONSTANT
             )
 
-            sample.joints = self.apply_to_keypoints(sample.joints, mat_output, sample.image.shape[:2])
+            # Sanitize below applies the sample's board annotation policy.
+            sample.joints = self.apply_to_keypoints(sample.joints, mat_output, sample.image.shape[:2], clip_outside=False)
 
             if sample.bboxes_xywh is not None:
                 sample.bboxes_xywh = self.apply_to_bboxes(sample.bboxes_xywh, mat_output)
@@ -174,7 +175,7 @@ class KeypointsRandomAffineTransform(AbstractKeypointTransform):
         return xyxy_to_xywh(bboxes_xyxy, image_shape=None).astype(bboxes_xywh.dtype)
 
     @classmethod
-    def apply_to_keypoints(cls, keypoints: np.ndarray, mat: np.ndarray, image_shape: Tuple[int, int]) -> np.ndarray:
+    def apply_to_keypoints(cls, keypoints: np.ndarray, mat: np.ndarray, image_shape: Tuple[int, int], clip_outside: bool = True) -> np.ndarray:
         """
         Apply affine transform to keypoints.
 
@@ -182,6 +183,7 @@ class KeypointsRandomAffineTransform(AbstractKeypointTransform):
         :param mat:         [2,3] Affine transformation matrix
         :param image_shape: Image shape after applying affine transform (height, width).
                             Used to update visibility status of keypoints.
+        :param clip_outside: Mask off-image points, unless the caller will sanitize the sample with its own policy.
         :return:            [N,K,3] array of keypoints in (x,y,visibility) format
         """
         keypoints_with_visibility = keypoints.copy()
@@ -202,7 +204,8 @@ class KeypointsRandomAffineTransform(AbstractKeypointTransform):
         joints_outside_image = outside_left | outside_top | outside_right | outside_bottom
 
         keypoints_with_visibility[:, :, 0:2] = keypoints
-        keypoints_with_visibility[joints_outside_image, 2] = 0
+        if clip_outside:
+            keypoints_with_visibility[joints_outside_image, 2] = 0
         return keypoints_with_visibility.astype(dtype, copy=False)
 
     @classmethod

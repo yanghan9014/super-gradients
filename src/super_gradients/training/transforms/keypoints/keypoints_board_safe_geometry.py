@@ -18,7 +18,9 @@ class KeypointsBoardSafeGeometry(KeypointsRandomPerspectiveTransform):
     the accepted affine/perspective matrix is rendered once by the parent transform.
     Each board retains at least ceil(min_retained_fraction * initially visible points),
     and at least min_visible_keypoints where the input contains that many. Pre-existing
-    invisible landmarks remain invisible. If no candidate passes, use the identity.
+    unannotated landmarks remain unannotated. If no candidate passes, use the identity.
+    This clipping guard limits lost image context; the sample's annotation policy
+    separately controls supervision of known landmarks outside the canvas.
 
     Rejection sampling deliberately biases rotations away from excessive clipping for
     the chosen framing. It does not shrink the board to accommodate those rotations.

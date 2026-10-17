@@ -15,6 +15,7 @@ class KeypointsLetterbox(AbstractKeypointTransform):
 
     Uses the inference processors directly so image pixels, rounding, and offsets match.
     Known off-image keypoints can enter the padded canvas; missing (v=0) points stay missing.
+    With board annotation preservation enabled, known board points also remain supervised outside it.
     """
 
     def __init__(self, output_height=480, output_width=640, image_pad_value=0, mask_pad_value=1):
