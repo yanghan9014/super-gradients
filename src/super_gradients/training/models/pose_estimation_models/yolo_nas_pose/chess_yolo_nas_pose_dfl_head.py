@@ -40,6 +40,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         num_joints: int = 9,
         cls_dropout_rate: float = 0.0,
         reg_dropout_rate: float = 0.0,
+        factorized_piece_color: bool = False,
     ):
         """
         Initialize the ChessYoloNASPoseDFLHead.
@@ -59,6 +60,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         :param num_joints: Number of keypoints per detection (default 9).
         :param cls_dropout_rate: Dropout rate for the classification head.
         :param reg_dropout_rate: Dropout rate for the regression head.
+        :param factorized_piece_color: Share six piece types across colors and predict white/black
+               with a separate projection of the same classification features. num_classes stays
+               13 for the external label contract; raw classification has 7 type/board logits.
         """
         super().__init__(in_channels)
 
@@ -79,6 +83,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             groups = bbox_inter_channels // first_conv_group_size
 
         self.num_classes = num_classes               # detection classes
+        if factorized_piece_color and num_classes != 13:
+            raise ValueError("Factorized chess classification requires 12 piece labels plus board (num_classes=13)")
+        self.factorized_piece_color = factorized_piece_color
         self.num_joints = num_joints                  # keypoints per detection
         self.shared_stem = shared_stem
         self.pose_conf_in_class_head = False
@@ -127,8 +134,11 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         # DFL regression for bounding boxes
         self.reg_pred = nn.Conv2d(bbox_inter_channels, 4 * (reg_max + 1), 1, 1, 0)
 
-        # Multi-class detection: [B, num_classes, H, W]
-        self.cls_pred = nn.Conv2d(bbox_inter_channels, self.num_classes, 1, 1, 0)
+        # Background rejection stays in the type/board detector. Both projections
+        # use the existing classification tower; no additional convolutional tower.
+        self.cls_pred = nn.Conv2d(bbox_inter_channels, 7 if factorized_piece_color else self.num_classes, 1, 1, 0)
+        if factorized_piece_color:
+            self.color_pred = nn.Conv2d(bbox_inter_channels, 2, 1, 1, 0)
 
         # ----- pose branch -----
         if pose_block_use_repvgg:
@@ -152,6 +162,10 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         """
         Update detection classes only. Keypoint count is fixed (1).
         """
+        if self.factorized_piece_color:
+            if num_classes != 13:
+                raise ValueError("Factorized chess classification requires num_classes=13")
+            return
         self.cls_pred = compute_new_weights_fn(self.cls_pred, num_classes)
         self.num_classes = num_classes
 
@@ -159,7 +173,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
     def out_channels(self):
         return None
 
-    def forward(self, x) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, x) -> Tuple[Tensor, ...]:
         """
         :param x: Input feature map of shape [B, Cin, H, W]
         :return: Tuple of [reg_output, cls_output, pose_regression, pose_logits]
@@ -167,6 +181,8 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             - cls_output:      [B, num_classes, H, W]
             - pose_regression: [B, num_joints, 2, H, W]
             - pose_logits:     [B, num_joints, H, W]
+        Factorized mode appends color_logits [B, 2, H, W] and uses 7 cls_output
+        channels (P,N,B,R,Q,K,board). Legacy mode retains the four-tensor tuple.
         """
         x = self.stem(x)
         pose_features = self.pose_stem(x)
@@ -196,8 +212,16 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_logits = pose_output[:, :, 2, :, :]        # [B, num_joints, H, W]
         pose_regression = pose_output[:, :, 0:2, :, :]  # [B, num_joints, 2, H, W]
 
+        if self.factorized_piece_color:
+            return reg_output, cls_output, pose_regression, pose_logits, self.color_pred(cls_feat)
         return reg_output, cls_output, pose_regression, pose_logits
 
     def _initialize_biases(self):
         prior_bias = -math.log((1 - self.prior_prob) / self.prior_prob)
         torch.nn.init.constant_(self.cls_pred.bias, prior_bias)
+        if self.factorized_piece_color:
+            # A neutral color probability halves each type score. Preserve the
+            # old per-colored-piece prior while keeping the board prior unchanged.
+            piece_prior = 2 * self.prior_prob
+            torch.nn.init.constant_(self.cls_pred.bias[:6], -math.log((1 - piece_prior) / piece_prior))
+            torch.nn.init.zeros_(self.color_pred.bias)

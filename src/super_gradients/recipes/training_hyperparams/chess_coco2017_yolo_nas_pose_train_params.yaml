@@ -25,6 +25,8 @@ criterion_params:
     piece_oks_sigma: ${dataset_params.piece_oks_sigma}
     board_class_id: 12
     num_classes: ${dataset_params.num_classes}
+    factorized_piece_color: ${arch_params.heads.ChessYoloNASPoseNDFLHeads.factorized_piece_color}
+    piece_color_loss_weight: 1.0
     # Loss weights and assigner settings are the upstream yolo_nas_pose defaults.
     classification_loss_weight: 1.0
     classification_loss_type: focal

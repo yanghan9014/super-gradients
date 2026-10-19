@@ -11,12 +11,16 @@ from super_gradients.modules.base_modules import BaseDetectionModule
 from super_gradients.training.models.detection_models.pp_yolo_e.pp_yolo_head import generate_anchors_for_grid_cell
 from super_gradients.training.utils import HpmStruct, torch_version_is_greater_or_equal
 from super_gradients.training.utils.bbox_utils import batch_distance2bbox
+from super_gradients.training.utils.chess_classification import chess_joint_scores
 from super_gradients.training.utils.utils import infer_model_dtype, infer_model_device
 
 # Declare type aliases for better readability
 # We cannot use typing.TypeAlias since it is not supported in python 3.7
 YoloNasPoseDecodedPredictions = Tuple[Tensor, Tensor, Tensor, Tensor]
-YoloNasPoseRawOutputs = Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor]
+YoloNasPoseRawOutputs = Union[
+    Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor],
+    Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor, Tensor],
+]
 
 
 @register_detection_module()
@@ -34,6 +38,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         width_mult: float = 1.0,
         pose_offset_multiplier: float = 1.0,
         compensate_grid_cell_offset: bool = True,
+        factorized_piece_color: bool = False,
     ):
         """
         Initializes the NDFLHeads module.
@@ -55,6 +60,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
                If True, predicted pose coordinates decoded as (offsets + anchors - grid_cell_offset) * stride.
                If False, predicted pose coordinates decoded as (offsets + anchors) * stride.
                Default value is True.
+        :param factorized_piece_color: Six shared piece types plus a two-way color projection.
+               Decoded outputs retain 13 classes; raw outputs append the two color logits.
 
         """
         in_channels = [max(round(c * width_mult), 1) for c in in_channels]
@@ -62,6 +69,9 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         self.in_channels = tuple(in_channels)
         self.num_classes = num_classes
+        if factorized_piece_color and num_classes != 13:
+            raise ValueError("Factorized chess classification requires num_classes=13")
+        self.factorized_piece_color = factorized_piece_color
         self.grid_cell_scale = grid_cell_scale
         self.grid_cell_offset = grid_cell_offset
         self.reg_max = reg_max
@@ -82,6 +92,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         self.num_heads = len(heads_list)
         fpn_strides: List[int] = []
         for i in range(self.num_heads):
+            heads_list[i] = factory.insert_module_param(heads_list[i], "factorized_piece_color", factorized_piece_color)
             new_head = factory.get(factory.insert_module_param(heads_list[i], "in_channels", in_channels[i]))
             fpn_strides.append(new_head.stride)
             setattr(self, f"head{i + 1}", new_head)
@@ -130,23 +141,28 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         :return: Return value depends on the mode:
         If tracing, a tuple of 4 tensors (decoded predictions) is returned:
         - pred_bboxes [B, Num Anchors, 4] - Predicted boxes in XYXY format
-        - pred_scores [B, Num Anchors, 1] - Predicted scores for each box
+        - pred_scores [B, Num Anchors, num_classes] - Joint colored-piece and board scores
         - pred_pose_coords [B, Num Anchors, Num Keypoints, 2] - Predicted poses in XY format
         - pred_pose_scores [B, Num Anchors, Num Keypoints] - Predicted scores for each keypoint
 
         In training/eval mode, a tuple of 2 tensors returned:
         - decoded predictions - they are the same as in tracing mode
-        - raw outputs - a tuple of 8 elements in total, this is needed for training the model.
+        - raw outputs - 8 elements in legacy mode; factorized mode appends color logits
+          [B, Num Anchors, 2] and uses 7 type/board channels in its first element.
         """
 
         cls_score_list, reg_distri_list, reg_dist_reduced_list = [], [], []
         pose_regression_list = []
         pose_logits_list = []
+        color_logits_list = []
 
         for i, feat in enumerate(feats):
             b, _, h, w = feat.shape
             height_mul_width = h * w
-            reg_distri, cls_logit, pose_regression, pose_logits = getattr(self, f"head{i + 1}")(feat)
+            head_outputs = getattr(self, f"head{i + 1}")(feat)
+            reg_distri, cls_logit, pose_regression, pose_logits = head_outputs[:4]
+            if self.factorized_piece_color:
+                color_logits_list.append(head_outputs[4].flatten(2).permute(0, 2, 1))
             reg_distri_list.append(torch.permute(reg_distri.flatten(2), [0, 2, 1]))
 
             reg_dist_reduced = torch.permute(reg_distri.reshape([-1, 4, self.reg_max + 1, height_mul_width]), [0, 2, 3, 1])
@@ -178,7 +194,11 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         else:
             anchor_points_inference, stride_tensor = self._generate_anchors(feats)
 
-        pred_scores = cls_score_list.sigmoid()
+        if self.factorized_piece_color:
+            color_logits = torch.cat(color_logits_list, dim=1)
+            pred_scores = chess_joint_scores(cls_score_list, color_logits)
+        else:
+            pred_scores = cls_score_list.sigmoid()
         pred_bboxes = batch_distance2bbox(anchor_points_inference, reg_dist_reduced_list) * stride_tensor  # [B, Anchors, 4]
 
         # Decode keypoints
@@ -212,6 +232,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
             num_anchors_list,
             stride_tensor,
         )
+        if self.factorized_piece_color:
+            raw_predictions += (color_logits,)
         return decoded_predictions, raw_predictions
 
     @property
