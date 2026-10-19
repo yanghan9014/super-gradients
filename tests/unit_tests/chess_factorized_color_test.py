@@ -153,6 +153,32 @@ def test_legacy_checkpoint_is_not_silently_interpreted_as_factorized():
         model.replace_num_classes(12, lambda *args: None)
 
 
+def test_full_model_training_and_torch_export():
+    from super_gradients.training import models
+
+    recipes = Path(__file__).resolve().parents[2] / "src/super_gradients/recipes"
+    arch = OmegaConf.load(recipes / "arch_params/chess_yolo_nas_pose_s_arch_params.yaml")
+    model = models.get("yolo_nas_pose_s", arch_params=arch, num_classes=13, pretrained_weights=None)
+    inputs = torch.randn(2, 3, 64, 64)
+    total, _ = criterion()(model(inputs), targets())
+    total.backward()
+    assert torch.isfinite(total)
+    for scale in (model.heads.head1, model.heads.head2, model.heads.head3):
+        assert torch.isfinite(scale.color_pred.weight.grad).all()
+
+    model.eval()
+    with torch.no_grad():
+        decoded = model(inputs)[0]
+        model.prep_model_for_conversion(input_size=(64, 64))
+        assert model.heads.inference_mode
+        converted = model(inputs)
+        assert len(converted) == 4 and converted[1].shape[-1] == 13
+        torch.testing.assert_close(converted, decoded, rtol=1e-4, atol=1e-4)
+        if hasattr(torch, "export"):
+            exported = torch.export.export(model, (inputs,))
+            torch.testing.assert_close(exported.module()(inputs), converted)
+
+
 @pytest.mark.parametrize("size", ["n", "s", "l"])
 def test_chess_recipes_enable_matching_head_and_loss(size):
     recipes = Path(__file__).resolve().parents[2] / "src/super_gradients/recipes"

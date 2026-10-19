@@ -61,8 +61,11 @@ automatic conversion of their classifier weights. Resume factorized checkpoints
 with their saved factorized configuration and this implementation. The external
 `num_classes` remains 13; annotations must not be relabeled to seven classes.
 
-Export keeps the score tensor contract through simple sigmoid, softmax and multiply
-operations. CPU tracing tests cover that composition; an actual trained CoreML
+Export preparation switches a factorized head to the four decoded tensors, so
+`torch.export` does not expose training-only logits. Legacy export preparation is
+unchanged. Export keeps the score tensor contract through simple sigmoid, softmax
+and multiply operations. CPU tracing and full-model `torch.export` tests cover
+that composition; an actual trained CoreML
 export and device parity run remain necessary before deploying a new model.
 Confidence calibration and recognition improvement require new training and the
 existing ChessVision post-training evaluation; this code change proves neither.
@@ -76,3 +79,9 @@ CUDA_VISIBLE_DEVICES='' PYTHONPATH=src python -m pytest -q \
   tests/unit_tests/chess_conditional_rotation_test.py \
   tests/unit_tests/chess_piece_metrics_test.py
 ```
+
+The upstream `tests.unit_tests` initializer eagerly imports unrelated optional
+data-adapter/PDF tests. If their dependencies are unavailable, collect these
+files with namespace-only `tests` / `tests.unit_tests` packages; production imports
+and the selected tests must still run unchanged. No training-environment dependency
+changes are needed for the focused suite.

@@ -106,6 +106,13 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         self.num_classes = num_classes
 
+    def prep_model_for_conversion(self, input_size=None, **kwargs):
+        # torch.export does not set torch.jit.is_tracing(). Expose only the four
+        # decoded tensors instead of exporting training-only type/color logits.
+        # Leave legacy export behavior intact for existing checkpoints.
+        if self.factorized_piece_color:
+            self.inference_mode = True
+
     @staticmethod
     def _insert_heads_list_params(
         heads_list: List[Union[HpmStruct, DictConfig]], factory: det_factory.DetectionModulesFactory, num_classes: int, reg_max: int
