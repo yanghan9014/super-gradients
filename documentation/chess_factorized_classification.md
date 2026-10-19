@@ -4,7 +4,7 @@ New chess N/S/L recipes enable `factorized_piece_color`. Each FPN scale keeps th
 existing classification convolution tower, with two independent 1x1 projections:
 
 ```text
-classification features ──┬── cls_pred:   P, N, B, R, Q, K, board (7 logits)
+classification features ──┬── cls_pred:   B, K, N, P, Q, R, board (7 logits)
                          └── color_pred: white, black           (2 logits)
 ```
 
@@ -17,7 +17,7 @@ all can be low on background. Color is a two-way softmax conditional on a piece.
 This avoids adding a separate objectness head just to reject empty locations.
 Inference composes `sigmoid(type_logit) * softmax(color_logits)[color]` and appends
 `sigmoid(board_logit)`. Decoded and traced outputs retain the same four tensors and
-13 score columns: `P,N,B,R,Q,K,p,n,b,r,q,k,board`. Metrics, postprocessing and app
+13 score columns: `B,K,N,P,Q,R,b,k,n,p,q,r,board`. Metrics, postprocessing and app
 class ordering therefore remain compatible. This conditional factorization
 assumes type and color are independent given the shared features; it cannot
 express an arbitrary 12-class distribution at a single anchor.
@@ -67,6 +67,10 @@ unchanged. Export keeps the score tensor contract through simple sigmoid, softma
 and multiply operations. CPU tracing and full-model `torch.export` tests cover
 that composition; an actual trained CoreML
 export and device parity run remain necessary before deploying a new model.
+The ChessVision exporter embeds `piece_color_factorized=1` as an ExecuTorch
+constant method. The app can then recover the color softmax from the existing
+scores (sum of white scores divided by sum of all piece scores) without changing
+the forward tensors. Exports without that metadata retain legacy tracker behavior.
 Confidence calibration and recognition improvement require new training and the
 existing ChessVision post-training evaluation; this code change proves neither.
 

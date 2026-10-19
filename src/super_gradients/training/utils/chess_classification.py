@@ -9,7 +9,7 @@ def chess_joint_scores(type_logits: Tensor, color_logits: Tensor) -> Tensor:
 
     Six sigmoid type scores retain the detector's background/quality confidence.
     Color is conditional on a piece: a two-way softmax splits each type's score.
-    The output order remains P,N,B,R,Q,K,p,n,b,r,q,k,board. The board is independent
+    The output order remains B,K,N,P,Q,R,b,k,n,p,q,r,board. The board is independent
     of color. Keep this same composition in inference and task-aligned assignment.
     """
     type_scores = type_logits.sigmoid()
