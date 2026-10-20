@@ -10,7 +10,7 @@ B,K,N,P,Q,R; color order is white,black.
 For each anchor, `s(type,color) = objectness * P(type) * P(color)`. The twelve
 piece scores sum to objectness. Board remains an independent sigmoid, with its
 existing focal/BCE target, loss weight, normalization, geometry and postprocessing.
-The joint score vector remains available for assignment and class-based metrics.
+The joint score vector remains available for assignment and class labels.
 
 ## Supervision
 
@@ -43,15 +43,36 @@ Piece thresholding and candidate ranking use objectness. Board thresholding stay
 unchanged. The separate tensors survive candidate selection, square mapping, the
 tracker input and recording as `piece_classifications`. Each square has objectness,
 all six type probabilities and both color probabilities. Display labels remain
-argmax summaries. The tracker retains these full outputs, uses objectness for its
-existing occupancy credit rate and the color distribution for color evidence;
-its existing hard type-mismatch rule is unchanged by this output-contract change.
+argmax summaries. The current tracker retains these full outputs in three
+independent evidence vectors: presence `[empty, occupied]`, six types, and two
+colors. Each vector has its own evidence cap. Objectness supplies presence
+evidence and weights incoming type/color evidence. Type and color disagreement
+use their respective probability-derived evidence; neither uses only the hard
+display label. Evidence changes smoothly over elapsed time without resetting
+all three vectors when one label changes.
 
 The exporter embeds `piece_objectness_separate=1` as well as
 `piece_color_factorized=1`. This identifies the seven-output contract explicitly;
 legacy exports with extra internal tensors still use their existing keypoint slot.
 New models require a new training run and an updated client before promotion.
 No automatic checkpoint conversion or app model promotion is performed.
+
+## Validation score semantics
+
+`Piece_mAP` matches colored piece classes by board square, using annotated board
+geometry and no confidence cutoff. With separate objectness outputs,
+`square_readings` selects the highest-objectness anchor per square and uses that
+objectness as the score for the class-specific precision-recall curve. Its class
+label still comes from the maximum joint type/color score.
+
+Earlier models instead selected square winners and ranked predictions by the
+maximum joint colored-piece score. Therefore an mAP comparison across this change
+mixes changes in the model with changes in candidate selection and ranking. High
+objectness does not imply high confidence in the selected type or color. A
+controlled comparison must hold those scoring rules fixed; a lower mAP alone
+cannot isolate which change caused it. The end-to-end incorrect-squares metrics
+also use the new objectness-based square winners and tune the piece threshold.
+Tracker inputs keep all three outputs separately regardless of metric scoring.
 
 ## Compatibility
 
@@ -61,7 +82,10 @@ Constructor defaults for both flags are false. Saved legacy configurations retai
 Set `piece_objectness=false` to reproduce that earlier architecture. Set both flags
 false for the original classifier. Each model must use its own resolved config;
 strict checkpoint loading prevents accidental reinterpretation. Old exports keep
-four decoded outputs and their original tracker behavior.
+four decoded outputs. The current tracker's legacy adapter can consume them using
+confidence as an occupancy proxy, hard type labels, and available color
+probabilities (otherwise hard colors). This compatibility path cannot recover
+independent objectness or a full type distribution that an old model did not emit.
 
 The earlier factorized-color design is documented below for saved runs.
 
