@@ -63,7 +63,8 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
 
         decoded_predictions: List[ChessPoseEstimationPredictions] = []
         for pred_values in zip(*predictions):
-            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = pred_values
+            pred_bboxes_xyxy, pred_bboxes_conf, pred_pose_coords, pred_pose_scores = pred_values[:4]
+            separate = pred_values[4:] if len(pred_values) == 7 else None
             # pred_bboxes_xyxy  [Anchors, 4] in XYXY format
             # pred_bboxes_conf  [Anchors, NumClasses] confidence scores [0..1]
             # pred_pose_coords  [Anchors, NumJoints, 2] in (x,y) format
@@ -71,6 +72,8 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
 
             # Piece predictions: max over classes 0 to 11
             piece_conf, piece_label = torch.max(pred_bboxes_conf[:, :BOARD_CLASS_ID], dim=1)
+            if separate is not None:
+                piece_conf = separate[0].squeeze(-1)
             piece_mask = piece_conf >= self.pose_confidence_threshold
             if self.piece_kp_threshold > 0.0:
                 piece_mask = piece_mask & (pred_pose_scores[:, 0] >= self.piece_kp_threshold)
@@ -87,6 +90,7 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 pred_bboxes_xyxy[piece_mask],
                 pred_pose_coords[piece_mask],
                 pred_pose_scores[piece_mask],
+                tuple(x[piece_mask] for x in separate) if separate is not None else None,
             )
 
             # ---- Process board (class 12): take the best board by combined score ----
@@ -132,6 +136,15 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                 final_bboxes = pred_bboxes_xyxy.new_zeros((0, 4))
 
             k = self.post_nms_max_predictions
+            separated = {}
+            if separate is not None:
+                for key, width in (("piece_objectness", 1), ("piece_type_probabilities", 6), ("piece_color_probabilities", 2)):
+                    parts = []
+                    if board_final is not None:
+                        parts.append(pred_bboxes_conf.new_zeros((len(board_final["scores"]), width)))
+                    if piece_final is not None:
+                        parts.append(piece_final[key])
+                    separated[key] = (torch.cat(parts) if parts else pred_bboxes_conf.new_zeros((0, width)))[:k]
             decoded_predictions.append(
                 ChessPoseEstimationPredictions(
                     poses=final_poses[:k],
@@ -139,12 +152,13 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
                     scores=final_scores[:k],
                     labels=final_labels[:k],
                     bboxes_xyxy=final_bboxes[:k],
+                    **separated,
                 )
             )
 
         return decoded_predictions
 
-    def _process_pieces(self, cls_conf, cls_label, bboxes_conf, bboxes_xyxy, pose_coords, pose_scores):
+    def _process_pieces(self, cls_conf, cls_label, bboxes_conf, bboxes_xyxy, pose_coords, pose_scores, separate=None):
         """Apply top-K + NMS to piece detections. Returns dict or None."""
         if cls_conf.numel() == 0:
             return None
@@ -159,13 +173,19 @@ class ChessYoloNASPosePostPredictionCallback(AbstractPoseEstimationPostPredictio
             bboxes_xyxy = bboxes_xyxy[idx]
             pose_coords = pose_coords[idx]
             pose_scores = pose_scores[idx]
+            if separate is not None:
+                separate = tuple(x[idx] for x in separate)
 
         # Per-class NMS
         nms_idx = torchvision.ops.boxes.batched_nms(
             boxes=bboxes_xyxy, scores=cls_conf, idxs=cls_label, iou_threshold=self.nms_iou_threshold
         )
 
+        separated = {} if separate is None else dict(zip(
+            ("piece_objectness", "piece_type_probabilities", "piece_color_probabilities"),
+            (x[nms_idx] for x in separate)))
         return {
+            **separated,
             "poses": pose_coords[nms_idx],         # [M, J, 2]
             "pose_scores": pose_scores[nms_idx],    # [M, J]
             "scores": bboxes_conf[nms_idx],         # [M, C]

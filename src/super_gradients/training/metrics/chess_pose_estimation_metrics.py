@@ -268,14 +268,16 @@ class ChessPoseEstimationMetrics(Metric):
 
         Images whose annotation has no usable board cannot place their pieces, so they are left out.
         """
-        class_scores, pose_coords, pose_scores = (x.detach().float().cpu().numpy() for x in preds[0][1:])
+        class_scores, pose_coords, pose_scores = (x.detach().float().cpu().numpy() for x in preds[0][1:4])
+        objectness = preds[0][4].detach().float().cpu().numpy() if len(preds[0]) == 7 else None
         for i, sample in enumerate(gt_samples):
             joints, labels = np.asarray(sample.joints), np.asarray(sample.labels).reshape(-1)
             homography = annotated_board_homography(joints, labels, self.piece_image_size)
             if homography is None:
                 continue
             truth = annotated_squares(joints, labels, self.piece_image_size, homography=homography)
-            readings = square_readings(class_scores[i], pose_coords[i], homography, self.piece_image_size)
+            readings = square_readings(class_scores[i], pose_coords[i], homography, self.piece_image_size,
+                                       objectness=None if objectness is None else objectness[i])
             per_class, _ = match_squares(readings, truth)
             for cls, (matched, scores, targets) in per_class.items():
                 matched = torch.from_numpy(matched).view(-1, 1)
@@ -291,6 +293,7 @@ class ChessPoseEstimationMetrics(Metric):
                 confidence_threshold=self.piece_confidence_threshold,
                 board_keypoint_threshold=self.piece_board_keypoint_threshold,
                 piece_confidence_threshold=0.0,
+                objectness=None if objectness is None else objectness[i],
             )
             self.piece_end_to_end_frames.append((app_readings, truth))
             # Relaxed: a board read turned 180 degrees, judged by its geometry, has its squares turned back.

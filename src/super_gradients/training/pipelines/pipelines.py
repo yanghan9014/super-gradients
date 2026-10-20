@@ -474,6 +474,10 @@ class PoseEstimationPipeline(Pipeline):
                     bboxes_xyxy=bboxes_np,
                     image_shape=image.shape,
                     pose_scores=pose_scores_np,
+                    **{name: (getattr(image_level_predictions, name).detach().cpu().numpy()
+                              if torch.is_tensor(getattr(image_level_predictions, name, None))
+                              else getattr(image_level_predictions, name, None))
+                       for name in ("piece_objectness", "piece_type_probabilities", "piece_color_probabilities")},
                 )
             )
 

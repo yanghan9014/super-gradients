@@ -90,6 +90,9 @@ class PoseEstimationPrediction(Prediction):
         bboxes_xyxy: Optional[np.ndarray],
         image_shape: Tuple[int, int],
         pose_scores: Optional[np.ndarray] = None,
+        piece_objectness: Optional[np.ndarray] = None,
+        piece_type_probabilities: Optional[np.ndarray] = None,
+        piece_color_probabilities: Optional[np.ndarray] = None,
         **_,
     ):
         """
@@ -107,6 +110,9 @@ class PoseEstimationPrediction(Prediction):
         self.bboxes_xyxy = bboxes_xyxy
         self.image_shape = image_shape
         self.pose_scores = pose_scores
+        self.piece_objectness = piece_objectness
+        self.piece_type_probabilities = piece_type_probabilities
+        self.piece_color_probabilities = piece_color_probabilities
 
     def _validate_input(self, poses: np.ndarray, scores: np.ndarray, labels: np.ndarray, bboxes: Optional[np.ndarray]) -> None:
         if not isinstance(poses, np.ndarray):

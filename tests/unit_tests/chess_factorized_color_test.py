@@ -158,6 +158,7 @@ def test_full_model_training_and_torch_export():
 
     recipes = Path(__file__).resolve().parents[2] / "src/super_gradients/recipes"
     arch = OmegaConf.load(recipes / "arch_params/chess_yolo_nas_pose_s_arch_params.yaml")
+    arch.heads.ChessYoloNASPoseNDFLHeads.piece_objectness = False
     model = models.get("yolo_nas_pose_s", arch_params=arch, num_classes=13, pretrained_weights=None)
     inputs = torch.randn(2, 3, 64, 64)
     total, _ = criterion()(model(inputs), targets())

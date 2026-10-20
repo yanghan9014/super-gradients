@@ -41,6 +41,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         cls_dropout_rate: float = 0.0,
         reg_dropout_rate: float = 0.0,
         factorized_piece_color: bool = False,
+        piece_objectness: bool = False,
     ):
         """
         Initialize the ChessYoloNASPoseDFLHead.
@@ -86,6 +87,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         if factorized_piece_color and num_classes != 13:
             raise ValueError("Factorized chess classification requires 12 piece labels plus board (num_classes=13)")
         self.factorized_piece_color = factorized_piece_color
+        if piece_objectness and not factorized_piece_color:
+            raise ValueError("piece_objectness requires factorized_piece_color")
+        self.piece_objectness = piece_objectness
         self.num_joints = num_joints                  # keypoints per detection
         self.shared_stem = shared_stem
         self.pose_conf_in_class_head = False
@@ -140,6 +144,9 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         if factorized_piece_color:
             self.color_pred = nn.Conv2d(bbox_inter_channels, 2, 1, 1, 0)
 
+        if piece_objectness:
+            self.objectness_pred = nn.Conv2d(bbox_inter_channels, 1, 1, 1, 0)
+
         # ----- pose branch -----
         if pose_block_use_repvgg:
             pose_block = partial(QARepVGGBlock, use_alpha=True)
@@ -182,7 +189,7 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             - pose_regression: [B, num_joints, 2, H, W]
             - pose_logits:     [B, num_joints, H, W]
         Factorized mode appends color_logits [B, 2, H, W] and uses 7 cls_output
-        channels (P,N,B,R,Q,K,board). Legacy mode retains the four-tensor tuple.
+        channels (B,K,N,P,Q,R,board). Legacy mode retains the four-tensor tuple.
         """
         x = self.stem(x)
         pose_features = self.pose_stem(x)
@@ -212,6 +219,8 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_logits = pose_output[:, :, 2, :, :]        # [B, num_joints, H, W]
         pose_regression = pose_output[:, :, 0:2, :, :]  # [B, num_joints, 2, H, W]
 
+        if self.piece_objectness:
+            return reg_output, cls_output, pose_regression, pose_logits, self.color_pred(cls_feat), self.objectness_pred(cls_feat)
         if self.factorized_piece_color:
             return reg_output, cls_output, pose_regression, pose_logits, self.color_pred(cls_feat)
         return reg_output, cls_output, pose_regression, pose_logits
@@ -225,3 +234,6 @@ class ChessYoloNASPoseDFLHead(BaseDetectionModule, SupportsReplaceNumClasses):
             piece_prior = 2 * self.prior_prob
             torch.nn.init.constant_(self.cls_pred.bias[:6], -math.log((1 - piece_prior) / piece_prior))
             torch.nn.init.zeros_(self.color_pred.bias)
+        if self.piece_objectness:
+            torch.nn.init.zeros_(self.cls_pred.bias[:6])
+            torch.nn.init.constant_(self.objectness_pred.bias, prior_bias)

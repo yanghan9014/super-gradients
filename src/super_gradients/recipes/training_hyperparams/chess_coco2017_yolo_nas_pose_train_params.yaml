@@ -27,6 +27,7 @@ criterion_params:
     num_classes: ${dataset_params.num_classes}
     factorized_piece_color: ${arch_params.heads.ChessYoloNASPoseNDFLHeads.factorized_piece_color}
     piece_color_loss_weight: 1.0
+    piece_objectness: ${arch_params.heads.ChessYoloNASPoseNDFLHeads.piece_objectness}
     # Loss weights and assigner settings are the upstream yolo_nas_pose defaults.
     classification_loss_weight: 1.0
     classification_loss_type: focal

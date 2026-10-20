@@ -16,10 +16,11 @@ from super_gradients.training.utils.utils import infer_model_dtype, infer_model_
 
 # Declare type aliases for better readability
 # We cannot use typing.TypeAlias since it is not supported in python 3.7
-YoloNasPoseDecodedPredictions = Tuple[Tensor, Tensor, Tensor, Tensor]
+YoloNasPoseDecodedPredictions = Tuple[Tensor, ...]
 YoloNasPoseRawOutputs = Union[
     Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor],
     Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor, Tensor],
+    Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, List[int], Tensor, Tensor, Tensor],
 ]
 
 
@@ -39,6 +40,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_offset_multiplier: float = 1.0,
         compensate_grid_cell_offset: bool = True,
         factorized_piece_color: bool = False,
+        piece_objectness: bool = False,
     ):
         """
         Initializes the NDFLHeads module.
@@ -72,6 +74,9 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         if factorized_piece_color and num_classes != 13:
             raise ValueError("Factorized chess classification requires num_classes=13")
         self.factorized_piece_color = factorized_piece_color
+        if piece_objectness and not factorized_piece_color:
+            raise ValueError("piece_objectness requires factorized_piece_color")
+        self.piece_objectness = piece_objectness
         self.grid_cell_scale = grid_cell_scale
         self.grid_cell_offset = grid_cell_offset
         self.reg_max = reg_max
@@ -93,6 +98,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         fpn_strides: List[int] = []
         for i in range(self.num_heads):
             heads_list[i] = factory.insert_module_param(heads_list[i], "factorized_piece_color", factorized_piece_color)
+            heads_list[i] = factory.insert_module_param(heads_list[i], "piece_objectness", piece_objectness)
             new_head = factory.get(factory.insert_module_param(heads_list[i], "in_channels", in_channels[i]))
             fpn_strides.append(new_head.stride)
             setattr(self, f"head{i + 1}", new_head)
@@ -107,8 +113,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         self.num_classes = num_classes
 
     def prep_model_for_conversion(self, input_size=None, **kwargs):
-        # torch.export does not set torch.jit.is_tracing(). Expose only the four
-        # decoded tensors instead of exporting training-only type/color logits.
+        # torch.export does not set torch.jit.is_tracing(). Expose only the decoded
+        # tensors instead of exporting training-only type/color/objectness logits.
         # Leave legacy export behavior intact for existing checkpoints.
         if self.factorized_piece_color:
             self.inference_mode = True
@@ -162,6 +168,7 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         pose_regression_list = []
         pose_logits_list = []
         color_logits_list = []
+        objectness_logits_list = []
 
         for i, feat in enumerate(feats):
             b, _, h, w = feat.shape
@@ -170,6 +177,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
             reg_distri, cls_logit, pose_regression, pose_logits = head_outputs[:4]
             if self.factorized_piece_color:
                 color_logits_list.append(head_outputs[4].flatten(2).permute(0, 2, 1))
+            if self.piece_objectness:
+                objectness_logits_list.append(head_outputs[5].flatten(2).permute(0, 2, 1))
             reg_distri_list.append(torch.permute(reg_distri.flatten(2), [0, 2, 1]))
 
             reg_dist_reduced = torch.permute(reg_distri.reshape([-1, 4, self.reg_max + 1, height_mul_width]), [0, 2, 3, 1])
@@ -203,7 +212,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
 
         if self.factorized_piece_color:
             color_logits = torch.cat(color_logits_list, dim=1)
-            pred_scores = chess_joint_scores(cls_score_list, color_logits)
+            objectness_logits = torch.cat(objectness_logits_list, dim=1) if self.piece_objectness else None
+            pred_scores = chess_joint_scores(cls_score_list, color_logits, objectness_logits)
         else:
             pred_scores = cls_score_list.sigmoid()
         pred_bboxes = batch_distance2bbox(anchor_points_inference, reg_dist_reduced_list) * stride_tensor  # [B, Anchors, 4]
@@ -223,6 +233,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         pred_pose_scores = pose_logits_list.detach().clone().sigmoid()  # [B, Anchors, C]
 
         decoded_predictions = pred_bboxes, pred_scores, pred_pose_coords, pred_pose_scores
+        if self.piece_objectness:
+            decoded_predictions += (objectness_logits.sigmoid(), cls_score_list[..., :6].softmax(-1), color_logits.softmax(-1))
 
         if torch.jit.is_tracing() or self.inference_mode:
             return decoded_predictions
@@ -241,6 +253,8 @@ class ChessYoloNASPoseNDFLHeads(BaseDetectionModule, SupportsReplaceNumClasses):
         )
         if self.factorized_piece_color:
             raw_predictions += (color_logits,)
+        if self.piece_objectness:
+            raw_predictions += (objectness_logits,)
         return decoded_predictions, raw_predictions
 
     @property

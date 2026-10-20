@@ -85,6 +85,7 @@ def app_square_readings(
     confidence_threshold: float = 0.05,
     board_keypoint_threshold: float = 0.2,
     piece_confidence_threshold: Optional[float] = None,
+    objectness: Optional[np.ndarray] = None,
 ) -> Dict[int, Tuple[int, float]]:
     """One frame as the app reads it: {square: (piece class, confidence)}.
 
@@ -101,6 +102,7 @@ def app_square_readings(
         homography,
         image_size,
         confidence_threshold if piece_confidence_threshold is None else piece_confidence_threshold,
+        objectness=objectness,
     )
 
 
@@ -142,14 +144,14 @@ def rotate_readings_180(readings: Dict[int, Tuple[int, float]]) -> Dict[int, Tup
     return {63 - square: reading for square, reading in readings.items()}
 
 
-def square_readings(class_scores, pose_coords, homography, image_size, confidence_threshold=0.0):
+def square_readings(class_scores, pose_coords, homography, image_size, confidence_threshold=0.0, objectness=None):
     """Highest-scoring piece per square in the supplied geometry; no class-aware matching.
 
     A zero cutoff keeps even zero-score candidates. No candidates on a square means no reading.
     """
     piece_scores = class_scores[:, :NUM_PIECE_CLASSES]
     piece_class = piece_scores.argmax(axis=1)
-    piece_conf = piece_scores.max(axis=1)
+    piece_conf = piece_scores.max(axis=1) if objectness is None else np.asarray(objectness).reshape(-1)
     pieces = np.flatnonzero(piece_conf >= confidence_threshold)
     readings: Dict[int, Tuple[int, float]] = {}
     # The piece's position is its first keypoint. Strictly higher confidence replaces the

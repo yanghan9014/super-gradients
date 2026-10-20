@@ -44,6 +44,9 @@ class ChessPoseEstimationPredictions:
     scores: Union[Tensor, np.ndarray]
     labels: Union[Tensor, np.ndarray]
     bboxes_xyxy: Optional[Union[Tensor, np.ndarray]]
+    piece_objectness: Optional[Union[Tensor, np.ndarray]] = None
+    piece_type_probabilities: Optional[Union[Tensor, np.ndarray]] = None
+    piece_color_probabilities: Optional[Union[Tensor, np.ndarray]] = None
 
 
 class AbstractPoseEstimationPostPredictionCallback(abc.ABC):

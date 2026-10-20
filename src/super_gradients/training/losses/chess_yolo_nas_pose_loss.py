@@ -395,6 +395,7 @@ class ChessYoloNASPoseLoss(nn.Module):
         rotation_invariant_max_pieces: Optional[int] = None,
         log_pose_diagnostics: bool = False,
         factorized_piece_color: bool = False,
+        piece_objectness: bool = False,
         piece_color_loss_weight: float = 1.0,
     ):
         """
@@ -428,6 +429,9 @@ class ChessYoloNASPoseLoss(nn.Module):
         if not math.isfinite(piece_color_loss_weight) or piece_color_loss_weight < 0:
             raise ValueError("piece_color_loss_weight must be finite and nonnegative")
         self.factorized_piece_color = factorized_piece_color
+        if piece_objectness and not factorized_piece_color:
+            raise ValueError("piece_objectness requires factorized_piece_color")
+        self.piece_objectness = piece_objectness
         self.piece_color_loss_weight = piece_color_loss_weight
         
         if board_oks_sigmas is None and oks_sigmas is not None:
@@ -531,10 +535,11 @@ class ChessYoloNASPoseLoss(nn.Module):
                         second element is stacked tensor of all individual losses
         """
         _, predictions = outputs
-        expected_tensors = 9 if self.factorized_piece_color else 8
+        expected_tensors = 10 if self.piece_objectness else (9 if self.factorized_piece_color else 8)
         if len(predictions) != expected_tensors:
-            raise ValueError("Head and loss must use the same factorized_piece_color setting")
+            raise ValueError("Head and loss must use the same factorized_piece_color and piece_objectness settings")
         color_logits = predictions[8] if self.factorized_piece_color else None
+        objectness_logits = predictions[9] if self.piece_objectness else None
 
         (
             pred_scores,
@@ -570,7 +575,8 @@ class ChessYoloNASPoseLoss(nn.Module):
 
         # label assignment
         assign_result = self.assigner(
-            pred_scores=(chess_joint_scores(pred_scores.detach(), color_logits.detach())
+            pred_scores=(chess_joint_scores(pred_scores.detach(), color_logits.detach(),
+                                            objectness_logits.detach() if objectness_logits is not None else None)
                          if self.factorized_piece_color else pred_scores.detach().sigmoid()),
             pred_bboxes=pred_bboxes.detach() * stride_tensor,
             pred_pose_coords=pred_pose_coords.detach(),
@@ -591,7 +597,8 @@ class ChessYoloNASPoseLoss(nn.Module):
             torch.distributed.all_reduce(assigned_scores_sum, op=torch.distributed.ReduceOp.SUM)
             assigned_scores_sum /= get_world_size()
         assigned_scores_sum = torch.clip(assigned_scores_sum, min=1.0)
-        loss_cls = self._classification_loss(pred_scores, assigned_scores, assigned_scores_sum, color_logits)
+        loss_cls = self._classification_loss(pred_scores, assigned_scores, assigned_scores_sum, color_logits,
+                                             objectness_logits, assign_result.assigned_labels, assign_result.assigned_crowd)
 
         loss_iou, loss_dfl, loss_pose_cls, loss_pose_reg = self._bbox_loss(
             pred_distri,
@@ -636,10 +643,13 @@ class ChessYoloNASPoseLoss(nn.Module):
             names += ["rotation_eligible_fraction", "rotation_flipped_assigned_fraction"]
             if self.factorized_piece_color:
                 names += ["piece_loss_type", "piece_loss_color"]
+                if self.piece_objectness:
+                    names += ["piece_loss_objectness"]
         return names
 
     def _classification_loss(
-        self, pred_scores: Tensor, assigned_scores: Tensor, assigned_scores_sum: Tensor, color_logits: Optional[Tensor] = None
+        self, pred_scores: Tensor, assigned_scores: Tensor, assigned_scores_sum: Tensor, color_logits: Optional[Tensor] = None,
+        objectness_logits: Optional[Tensor] = None, assigned_labels: Optional[Tensor] = None, assigned_crowd: Optional[Tensor] = None
     ) -> Tensor:
         """Factor labels after assignment; retain all 13 joint labels for geometry and matching.
 
@@ -647,6 +657,9 @@ class ChessYoloNASPoseLoss(nn.Module):
         board anchors have zero color target, hence exactly zero color gradient.
         Soft assignment scores retain their quality weighting in both terms.
         """
+        if self.piece_objectness:
+            return self._piece_classification_loss(pred_scores, color_logits, objectness_logits, assigned_scores,
+                                                   assigned_scores_sum, assigned_labels, assigned_crowd)
         color_loss = pred_scores.new_zeros(())
         detection_targets = assigned_scores
         if self.factorized_piece_color:
@@ -677,6 +690,37 @@ class ChessYoloNASPoseLoss(nn.Module):
                 self._pose_diagnostics["piece_loss_type"] = by_class[:6].sum()
                 self._pose_diagnostics["piece_loss_color"] = weighted_color
         return cls_unreduced.sum() / assigned_scores_sum + color_loss
+
+    def _piece_classification_loss(self, logits, colors, objectness, scores, score_sum, labels, crowd):
+        # Use assignment labels, not soft quality: a poorly localized assigned piece
+        # is still a positive object. Board/background never supervise type or color.
+        positive = (labels < self.board_class_id) & ~crowd.bool()
+        count = positive.sum().float()
+        if self.average_losses_in_ddp and is_distributed():
+            torch.distributed.all_reduce(count)
+            count /= get_world_size()
+        count = count.clamp(min=1)
+        obj = F.binary_cross_entropy_with_logits(objectness[..., 0].float(), positive.float(), reduction="none")
+        obj = (obj * ~crowd.bool()).sum() / count
+        type_targets = F.one_hot(labels.clamp(max=11).remainder(6).long(), 6).to(logits.dtype)
+        color_targets = F.one_hot(labels.clamp(max=11).div(6, rounding_mode="floor").long(), 2).to(logits.dtype)
+        typ = -(F.log_softmax(logits[..., :6].float(), -1) * type_targets).sum(-1)
+        col = -(F.log_softmax(colors.float(), -1) * color_targets).sum(-1)
+        typ = (typ * positive).sum() / count
+        col = (col * positive).sum() / count * self.piece_color_loss_weight
+        # Keep the board's original targets, loss, normalization and weight.
+        if self.classification_loss_type == "focal":
+            board = self._focal_loss(logits[..., 6:7], scores[..., 12:13], alpha=-1, reduction="sum")
+        elif self.classification_loss_type == "bce":
+            board = F.binary_cross_entropy_with_logits(logits[..., 6:7], scores[..., 12:13], reduction="sum")
+        else:
+            raise ValueError(f"Unknown classification loss type: {self.classification_loss_type}")
+        board = board / score_sum
+        if self.log_pose_diagnostics:
+            for name, value in {"board_loss_cls": board, "piece_loss_cls": obj + typ + col,
+                                "piece_loss_objectness": obj, "piece_loss_type": typ, "piece_loss_color": col}.items():
+                self._pose_diagnostics[name] = value * self.classification_loss_weight
+        return board + obj + typ + col
 
     def _rotation_eligibility(self, targets):
         boards = (targets["gt_class"] == self.board_class_id) & targets["pad_gt_mask"].bool()

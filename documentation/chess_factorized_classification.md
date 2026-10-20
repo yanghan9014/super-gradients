@@ -1,3 +1,72 @@
+# Piece presence, type and color
+
+New chess N/S/L recipes enable both `factorized_piece_color` and `piece_objectness`.
+The existing classification tower has three projections: `cls_pred` contains six
+piece-type logits plus the unchanged board logit, `color_pred` contains two color
+logits, and `objectness_pred` contains one piece-presence logit. Types use a six-way
+softmax, colors a two-way softmax, and presence a sigmoid. The type order is
+B,K,N,P,Q,R; color order is white,black.
+
+For each anchor, `s(type,color) = objectness * P(type) * P(color)`. The twelve
+piece scores sum to objectness. Board remains an independent sigmoid, with its
+existing focal/BCE target, loss weight, normalization, geometry and postprocessing.
+The joint score vector remains available for assignment and class-based metrics.
+
+## Supervision
+
+Assignment still uses the composed 13 scores. Assigned piece labels provide hard
+objectness positives, including low-quality assignments. Other candidates are
+negatives; crowd candidates are ignored. Objectness uses BCEWithLogits. Type and
+color use hard-label cross-entropy only on assigned pieces. All three piece losses
+are summed and normalized by max(number of assigned pieces, 1), using the existing
+DDP mean convention. Color retains `piece_color_loss_weight`. Board keeps the old
+quality-weighted targets and total-quality normalization. No geometry weights,
+training schedule, dataset labels, or resume rules change.
+
+Separate diagnostics report piece objectness, type and color loss. Type/color
+biases start neutral; objectness starts at 0.01; board initialization is unchanged.
+
+## Output and tracker contract
+
+Training/evaluation return `(decoded, raw)`. Raw outputs append color logits and
+then objectness logits to the original eight tensors. Decoded/export outputs are:
+
+1. boxes `[B,A,4]`
+2. joint colored-piece/board scores `[B,A,13]`
+3. keypoint coordinates `[B,A,9,2]`
+4. keypoint confidence `[B,A,9]`
+5. piece objectness `[B,A,1]`
+6. conditional type probabilities `[B,A,6]`
+7. conditional color probabilities `[B,A,2]`
+
+Piece thresholding and candidate ranking use objectness. Board thresholding stays
+unchanged. The separate tensors survive candidate selection, square mapping, the
+tracker input and recording as `piece_classifications`. Each square has objectness,
+all six type probabilities and both color probabilities. Display labels remain
+argmax summaries. The tracker retains these full outputs, uses objectness for its
+existing occupancy credit rate and the color distribution for color evidence;
+its existing hard type-mismatch rule is unchanged by this output-contract change.
+
+The exporter embeds `piece_objectness_separate=1` as well as
+`piece_color_factorized=1`. This identifies the seven-output contract explicitly;
+legacy exports with extra internal tensors still use their existing keypoint slot.
+New models require a new training run and an updated client before promotion.
+No automatic checkpoint conversion or app model promotion is performed.
+
+## Compatibility
+
+Constructor defaults for both flags are false. Saved legacy configurations retain
+13 independent sigmoids; prior factorized configurations with only
+`factorized_piece_color=true` retain six type sigmoids and their color softmax.
+Set `piece_objectness=false` to reproduce that earlier architecture. Set both flags
+false for the original classifier. Each model must use its own resolved config;
+strict checkpoint loading prevents accidental reinterpretation. Old exports keep
+four decoded outputs and their original tracker behavior.
+
+The earlier factorized-color design is documented below for saved runs.
+
+---
+
 # Shared piece types and separate color prediction
 
 New chess N/S/L recipes enable `factorized_piece_color`. Each FPN scale keeps the
