@@ -16,12 +16,19 @@ The joint score vector remains available for assignment and class labels.
 
 Assignment still uses the composed 13 scores. Assigned piece labels provide hard
 objectness positives, including low-quality assignments. Other candidates are
-negatives; crowd candidates are ignored. Objectness uses BCEWithLogits. Type and
-color use hard-label cross-entropy only on assigned pieces. All three piece losses
+negatives; crowd candidates are ignored. Objectness follows `classification_loss_type`:
+the default `focal` uses gamma 2 with no alpha balancing, matching board detection;
+`bce` explicitly selects BCEWithLogits for both. Objectness loss is computed in
+float32. Type and color use hard-label cross-entropy only on assigned pieces. All three piece losses
 are summed and normalized by max(number of assigned pieces, 1), using the existing
 DDP mean convention. Color retains `piece_color_loss_weight`. Board keeps the old
 quality-weighted targets and total-quality normalization. No geometry weights,
 training schedule, dataset labels, or resume rules change.
+
+Earlier separate-objectness code always used BCE for objectness, even with
+`classification_loss_type: focal`. This correction changes that training objective;
+use a fresh run to measure it. Reproducing or resuming the earlier objective requires
+its original source revision, since selecting `bce` here also changes the board loss.
 
 Separate diagnostics report piece objectness, type and color loss. Type/color
 biases start neutral; objectness starts at 0.01; board initialization is unchanged.

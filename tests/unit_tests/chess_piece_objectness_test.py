@@ -1,4 +1,6 @@
 """Separate presence/type/color contract, supervision, and lossless postprocessing."""
+import math
+
 import pytest
 import torch
 from super_gradients.training.losses.chess_yolo_nas_pose_loss import ChessYoloNASPoseLoss
@@ -44,7 +46,8 @@ def test_hard_presence_and_positive_only_class_supervision_keep_board_loss(kind)
     total = loss._classification_loss(types, scores, scores.sum(), colors, obj, labels, crowd)
     total.backward()
     # Low-quality pieces still get hard-positive targets, with equal gradients.
-    torch.testing.assert_close(obj.grad[0, :2], torch.full((2, 1), -.25))
+    expected_gradient = -.25 if kind == 'bce' else -(1 + 2 * math.log(2)) / 16
+    torch.testing.assert_close(obj.grad[0, :2], torch.full((2, 1), expected_gradient))
     assert (obj.grad[0, 2:] > 0).all()
     assert torch.count_nonzero(types.grad[0, 2:, :6]) == 0
     assert torch.count_nonzero(colors.grad[0, 2:]) == 0
@@ -57,6 +60,31 @@ def test_hard_presence_and_positive_only_class_supervision_keep_board_loss(kind)
     d = loss._pose_diagnostics
     torch.testing.assert_close(total.detach(), d['board_loss_cls']+d['piece_loss_cls'])
     torch.testing.assert_close(d['piece_loss_cls'], d['piece_loss_objectness']+d['piece_loss_type']+d['piece_loss_color'])
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
+def test_default_objectness_focal_suppresses_easy_examples_and_keeps_hard_negatives(dtype):
+    labels = torch.tensor([[0, 13, 13, 0]])
+    crowd = torch.tensor([[False, False, False, True]])
+    scores = torch.zeros(1, 4, 13)
+    scores[0, 0, 0] = .5
+    gradients = []
+    for options in ({}, {'classification_loss_type': 'bce'}):
+        loss = criterion(**options)
+        types = torch.zeros(1, 4, 7, dtype=dtype, requires_grad=True)
+        colors = torch.zeros(1, 4, 2, dtype=dtype, requires_grad=True)
+        # Easy positive, easy negative, hard negative, ignored crowd candidate.
+        obj = torch.tensor([[[12.], [-12.], [12.], [0.]]], dtype=dtype, requires_grad=True)
+        total = loss._classification_loss(types, scores, scores.sum().clamp(min=1), colors, obj, labels, crowd)
+        total.backward()
+        assert torch.isfinite(total)
+        assert all(torch.isfinite(t.grad).all() for t in (types, colors, obj))
+        gradients.append(obj.grad.flatten().float())
+    focal, bce = gradients
+    assert (bce[:2].abs() > 0).all()
+    assert (focal[:2].abs() < bce[:2].abs() * 1e-8).all()
+    assert focal[2] > .9 and bce[2] > .9
+    assert focal[3] == 0 and bce[3] == 0
 
 
 @pytest.mark.parametrize('empty', [False, True])

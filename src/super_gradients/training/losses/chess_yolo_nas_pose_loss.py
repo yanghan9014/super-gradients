@@ -700,7 +700,14 @@ class ChessYoloNASPoseLoss(nn.Module):
             torch.distributed.all_reduce(count)
             count /= get_world_size()
         count = count.clamp(min=1)
-        obj = F.binary_cross_entropy_with_logits(objectness[..., 0].float(), positive.float(), reduction="none")
+        # Honor the same focal/BCE choice as board detection. Keep this calculation
+        # in float32 so easy-background focal weights do not underflow prematurely.
+        if self.classification_loss_type == "focal":
+            obj = self._focal_loss(objectness[..., 0].float(), positive.float(), alpha=-1, reduction="none")
+        elif self.classification_loss_type == "bce":
+            obj = F.binary_cross_entropy_with_logits(objectness[..., 0].float(), positive.float(), reduction="none")
+        else:
+            raise ValueError(f"Unknown classification loss type: {self.classification_loss_type}")
         obj = (obj * ~crowd.bool()).sum() / count
         type_targets = F.one_hot(labels.clamp(max=11).remainder(6).long(), 6).to(logits.dtype)
         color_targets = F.one_hot(labels.clamp(max=11).div(6, rounding_mode="floor").long(), 2).to(logits.dtype)
