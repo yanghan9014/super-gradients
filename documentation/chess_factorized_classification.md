@@ -14,24 +14,50 @@ The joint score vector remains available for assignment and class labels.
 
 ## Supervision
 
-Assignment still uses the composed 13 scores. Assigned piece labels provide hard
-objectness positives, including low-quality assignments. Other candidates are
-negatives; crowd candidates are ignored. Objectness follows `classification_loss_type`:
+Assignment still uses the composed 13 scores. The objectness target is the sum of
+the twelve assigned piece-quality scores, so a poorly localized assignment has a
+soft target rather than an unconditional target of one. Board and background have
+zero piece-objectness targets; crowd candidates are ignored.
+Objectness follows `classification_loss_type`:
 the default `focal` uses gamma 2 with no alpha balancing, matching board detection;
 `bce` explicitly selects BCEWithLogits for both. Objectness loss is computed in
-float32. Type and color use hard-label cross-entropy only on assigned pieces. All three piece losses
-are summed and normalized by max(number of assigned pieces, 1), using the existing
-DDP mean convention. Color retains `piece_color_loss_weight`. Board keeps the old
-quality-weighted targets and total-quality normalization. No geometry weights,
+float32. Type and color retain their normalized softmax probabilities and ordinary
+categorical cross-entropy. Each assigned piece's identity loss is weighted by its
+quality; zero-quality, board and background anchors have zero identity gradient.
+All three piece losses divide by max(total assigned quality, 1), including board
+quality and using the existing shared DDP mean. Color retains
+`piece_color_loss_weight`. Board keeps its existing targets and normalization. The
+objectness score now includes localization quality, while identity probabilities
+remain conditional on a piece. No geometry weights,
 training schedule, dataset labels, or resume rules change.
 
 Earlier separate-objectness code always used BCE for objectness, even with
-`classification_loss_type: focal`. This correction changes that training objective;
-use a fresh run to measure it. Reproducing or resuming the earlier objective requires
-its original source revision, since selecting `bce` here also changes the board loss.
+`classification_loss_type: focal`, discarded quality from all three piece losses,
+and divided by the assigned-piece count. These corrections change that training
+objective; use a new run to measure them. Reproducing or resuming the earlier
+objective requires its original source revision. Selecting `bce` here does not
+restore hard targets or count normalization and also changes the board loss.
 
 Separate diagnostics report piece objectness, type and color loss. Type/color
 biases start neutral; objectness starts at 0.01; board initialization is unchanged.
+
+### Stability evidence
+
+Saved training checkpoints show a head-2 classifier regression after the separate
+objectness change. At epoch 1000, the first classifier convolution's weight norm
+and maximum absolute BN running mean were respectively 18.99 / 48.87 on
+`4d8d0fcd`, 19.16 / 49.17 on the factorized-color run at `b513fbbd` (which includes
+`90b6c29b`), and 619.11 / 36136.25 on `1a1eab0a`. In the last run, weight norm was
+already 136.42 at the earliest saved epoch-300 checkpoint. The factorized-color
+and separate-objectness runs used identical dataset snapshot/manifest hashes and
+training settings apart from enabling separate objectness. This implicates the
+changes bundled in `1a1eab0a`, but does not isolate a single causal line. BN running
+means are stored activation statistics, not measurements of historical peaks.
+
+A later focal-only experiment started from epoch-1000 EMA weights with a fresh
+optimizer and failed during its 111th epoch. That late intervention does not test
+whether focal would have prevented the initial growth. The quality-supervision
+correction above has regression tests; long-run numerical stability is unproven.
 
 ## Output and tracker contract
 

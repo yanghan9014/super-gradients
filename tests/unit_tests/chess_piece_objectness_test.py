@@ -34,7 +34,7 @@ def test_probabilities_sum_to_objectness_and_board_is_unchanged():
 
 
 @pytest.mark.parametrize('kind', ['bce', 'focal'])
-def test_hard_presence_and_positive_only_class_supervision_keep_board_loss(kind):
+def test_quality_targets_and_weighted_identity_supervision_keep_board_loss(kind):
     loss = criterion(classification_loss_type=kind)
     types = torch.zeros(1, 4, 7, requires_grad=True)
     colors = torch.zeros(1, 4, 2, requires_grad=True)
@@ -45,13 +45,20 @@ def test_hard_presence_and_positive_only_class_supervision_keep_board_loss(kind)
     scores[0, 0, 3], scores[0, 1, 9], scores[0, 2, 12] = .01, .9, .7
     total = loss._classification_loss(types, scores, scores.sum(), colors, obj, labels, crowd)
     total.backward()
-    # Low-quality pieces still get hard-positive targets, with equal gradients.
-    expected_gradient = -.25 if kind == 'bce' else -(1 + 2 * math.log(2)) / 16
-    torch.testing.assert_close(obj.grad[0, :2], torch.full((2, 1), expected_gradient))
+    # At zero logits, low-quality assignments push confidence down and strong
+    # assignments push it up. Normalize by total quality, including the board.
+    quality = torch.tensor([.01, .9, 0., 0.])
+    expected_gradient = (.5 - quality) / scores.sum()
+    if kind == 'focal':
+        # SG's quality focal form is |sigmoid(logit) - q|^2 * BCE(logit, q).
+        expected_gradient *= (.5 - quality).square() + math.log(2) / 2
+    torch.testing.assert_close(obj.grad.flatten(), expected_gradient)
     assert (obj.grad[0, 2:] > 0).all()
     assert torch.count_nonzero(types.grad[0, 2:, :6]) == 0
     assert torch.count_nonzero(colors.grad[0, 2:]) == 0
-    torch.testing.assert_close(types.grad[0, 0, :6], types.grad[0, 1, :6])
+    torch.testing.assert_close(types.grad[0, 0, :6] / .01, types.grad[0, 1, :6] / .9)
+    torch.testing.assert_close(types.grad[0, 0, 3], torch.tensor(-5 / 6 * .01 / 1.61))
+    torch.testing.assert_close(colors.grad[0, 0, 0], torch.tensor(-.5 * .01 / 1.61))
     assert colors.grad[0, 0, 0] < 0 < colors.grad[0, 1, 0]
     old = ChessYoloNASPoseLoss(num_classes=13, board_oks_sigmas=[.1]*9,
         factorized_piece_color=True, classification_loss_type=kind, log_pose_diagnostics=True)
@@ -67,7 +74,7 @@ def test_default_objectness_focal_suppresses_easy_examples_and_keeps_hard_negati
     labels = torch.tensor([[0, 13, 13, 0]])
     crowd = torch.tensor([[False, False, False, True]])
     scores = torch.zeros(1, 4, 13)
-    scores[0, 0, 0] = .5
+    scores[0, 0, 0] = 1.
     gradients = []
     for options in ({}, {'classification_loss_type': 'bce'}):
         loss = criterion(**options)
@@ -85,6 +92,43 @@ def test_default_objectness_focal_suppresses_easy_examples_and_keeps_hard_negati
     assert (focal[:2].abs() < bce[:2].abs() * 1e-8).all()
     assert focal[2] > .9 and bce[2] > .9
     assert focal[3] == 0 and bce[3] == 0
+
+
+@pytest.mark.parametrize('kind', ['bce', 'focal'])
+def test_objectness_matches_soft_quality_instead_of_forcing_one(kind):
+    loss = criterion(classification_loss_type=kind)
+    quality = torch.tensor([.1, .8])
+    obj = torch.logit(quality).reshape(1, 2, 1).requires_grad_()
+    scores = torch.zeros(1, 2, 13)
+    scores[0, :, 0] = quality
+    total = loss._classification_loss(
+        torch.zeros(1, 2, 7), scores, scores.sum().clamp(min=1),
+        torch.zeros(1, 2, 2), obj, torch.zeros(1, 2, dtype=torch.long),
+        torch.zeros(1, 2, dtype=torch.bool),
+    )
+    total.backward()
+    torch.testing.assert_close(obj.grad, torch.zeros_like(obj), atol=1e-7, rtol=0)
+
+
+@pytest.mark.parametrize('kind', ['bce', 'focal'])
+def test_zero_quality_assignments_and_crowd_do_not_supervise_identity(kind):
+    loss = criterion(classification_loss_type=kind)
+    types = torch.zeros(1, 3, 7, requires_grad=True)
+    colors = torch.zeros(1, 3, 2, requires_grad=True)
+    obj = torch.zeros(1, 3, 1, requires_grad=True)
+    labels = torch.tensor([[0, 12, 1]])
+    crowd = torch.tensor([[False, False, True]])
+    scores = torch.zeros(1, 3, 13)
+    scores[0, 1, 12] = .3
+    # A geometrically assigned piece can have zero quality. It must not receive
+    # hard-positive objectness or identity supervision merely from its label.
+    total = loss._classification_loss(types, scores, scores.sum().clamp(min=1), colors, obj, labels, crowd)
+    total.backward()
+    assert torch.isfinite(total)
+    assert obj.grad[0, 0, 0] > 0
+    assert obj.grad[0, 2, 0] == 0
+    assert torch.count_nonzero(types.grad[..., :6]) == 0
+    assert torch.count_nonzero(colors.grad) == 0
 
 
 @pytest.mark.parametrize('empty', [False, True])

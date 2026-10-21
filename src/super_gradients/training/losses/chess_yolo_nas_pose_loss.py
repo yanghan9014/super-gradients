@@ -692,29 +692,28 @@ class ChessYoloNASPoseLoss(nn.Module):
         return cls_unreduced.sum() / assigned_scores_sum + color_loss
 
     def _piece_classification_loss(self, logits, colors, objectness, scores, score_sum, labels, crowd):
-        # Use assignment labels, not soft quality: a poorly localized assigned piece
-        # is still a positive object. Board/background never supervise type or color.
+        # Keep the assigner's localization quality in piece supervision. Identity
+        # remains conditional on a piece, so quality weights its categorical loss
+        # rather than changing the normalized type/color probability contract.
         positive = (labels < self.board_class_id) & ~crowd.bool()
-        count = positive.sum().float()
-        if self.average_losses_in_ddp and is_distributed():
-            torch.distributed.all_reduce(count)
-            count /= get_world_size()
-        count = count.clamp(min=1)
+        quality = scores[..., :self.board_class_id].float().sum(-1) * positive
+        # score_sum already has the shared DDP mean and minimum-one clamp. Use
+        # the same total assigned quality as board classification and geometry.
         # Honor the same focal/BCE choice as board detection. Keep this calculation
         # in float32 so easy-background focal weights do not underflow prematurely.
         if self.classification_loss_type == "focal":
-            obj = self._focal_loss(objectness[..., 0].float(), positive.float(), alpha=-1, reduction="none")
+            obj = self._focal_loss(objectness[..., 0].float(), quality, alpha=-1, reduction="none")
         elif self.classification_loss_type == "bce":
-            obj = F.binary_cross_entropy_with_logits(objectness[..., 0].float(), positive.float(), reduction="none")
+            obj = F.binary_cross_entropy_with_logits(objectness[..., 0].float(), quality, reduction="none")
         else:
             raise ValueError(f"Unknown classification loss type: {self.classification_loss_type}")
-        obj = (obj * ~crowd.bool()).sum() / count
+        obj = (obj * ~crowd.bool()).sum() / score_sum
         type_targets = F.one_hot(labels.clamp(max=11).remainder(6).long(), 6).to(logits.dtype)
         color_targets = F.one_hot(labels.clamp(max=11).div(6, rounding_mode="floor").long(), 2).to(logits.dtype)
         typ = -(F.log_softmax(logits[..., :6].float(), -1) * type_targets).sum(-1)
         col = -(F.log_softmax(colors.float(), -1) * color_targets).sum(-1)
-        typ = (typ * positive).sum() / count
-        col = (col * positive).sum() / count * self.piece_color_loss_weight
+        typ = (typ * quality).sum() / score_sum
+        col = (col * quality).sum() / score_sum * self.piece_color_loss_weight
         # Keep the board's original targets, loss, normalization and weight.
         if self.classification_loss_type == "focal":
             board = self._focal_loss(logits[..., 6:7], scores[..., 12:13], alpha=-1, reduction="sum")
