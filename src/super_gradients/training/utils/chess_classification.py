@@ -11,8 +11,9 @@ def chess_joint_scores(type_logits: Tensor, color_logits: Tensor, objectness_log
     confidence. With objectness logits, each piece score is sigmoid(objectness)
     times a six-way type softmax times a two-way color softmax. The twelve piece
     scores then sum to objectness. The board always uses its independent sigmoid.
-    The output order remains B,K,N,P,Q,R,b,k,n,p,q,r,board. Keep this composition
-    identical in inference and task-aligned assignment.
+    The output order remains B,K,N,P,Q,R,b,k,n,p,q,r,board. Inference and legacy
+    factorized assignment use this composition. Separate-objectness assignment
+    uses objectness alone for every piece label and the independent board score.
     """
     if objectness_logits is None:
         type_scores = type_logits.sigmoid()

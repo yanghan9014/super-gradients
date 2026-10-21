@@ -10,14 +10,20 @@ B,K,N,P,Q,R; color order is white,black.
 For each anchor, `s(type,color) = objectness * P(type) * P(color)`. The twelve
 piece scores sum to objectness. Board remains an independent sigmoid, with its
 existing focal/BCE target, loss weight, normalization, geometry and postprocessing.
-The joint score vector remains available for assignment and class labels.
+The joint score vector remains available for inference and class labels.
 
 ## Supervision
 
-Assignment still uses the composed 13 scores. The objectness target is the sum of
-the twelve assigned piece-quality scores, so a poorly localized assignment has a
-soft target rather than an unconditional target of one. Board and background have
-zero piece-objectness targets; crowd candidates are ignored.
+Piece assignment uses `objectness * (box_IoU * keypoint_OKS)^6`, independent of
+type and color predictions. All twelve piece-label columns receive the same
+objectness score; the board column retains its independent sigmoid. Top-k
+selection and assignment-quality normalization use these scores with their
+existing formulas. Ground-truth labels still determine the type/color targets.
+
+The objectness target is the sum of the twelve assigned piece-quality scores,
+so a poorly localized assignment has a soft target rather than an unconditional
+target of one. Board and background have zero piece-objectness targets; crowd
+candidates are ignored.
 Objectness follows `classification_loss_type`:
 the default `focal` uses gamma 2 with no alpha balancing, matching board detection;
 `bce` explicitly selects BCEWithLogits for both. Objectness loss is computed in
@@ -28,14 +34,17 @@ All three piece losses divide by max(total assigned quality, 1), including board
 quality and using the existing shared DDP mean. Color retains
 `piece_color_loss_weight`. Board keeps its existing targets and normalization. The
 objectness score now includes localization quality, while identity probabilities
-remain conditional on a piece. No geometry weights,
-training schedule, dataset labels, or resume rules change.
+remain conditional on a piece. Geometry-loss formulas and configured weights
+are unchanged, but selected anchors and their quality weights can change with
+the new assignment scores. Training schedules, dataset labels, and resume rules
+are unchanged.
 
 Earlier separate-objectness code always used BCE for objectness, even with
 `classification_loss_type: focal`, discarded quality from all three piece losses,
-and divided by the assigned-piece count. These corrections change that training
-objective; use a new run to measure them. Reproducing or resuming the earlier
-objective requires its original source revision. Selecting `bce` here does not
+and divided by the assigned-piece count. It also included type/color probabilities
+in assignment. These corrections change that training objective; use a new run
+to measure them. Reproducing or resuming the earlier objective requires its
+original source revision. Selecting `bce` here does not
 restore hard targets or count normalization and also changes the board loss.
 
 Separate diagnostics report piece objectness, type and color loss. Type/color
@@ -57,7 +66,8 @@ means are stored activation statistics, not measurements of historical peaks.
 A later focal-only experiment started from epoch-1000 EMA weights with a fresh
 optimizer and failed during its 111th epoch. That late intervention does not test
 whether focal would have prevented the initial growth. The quality-supervision
-correction above has regression tests; long-run numerical stability is unproven.
+and assignment corrections above have regression tests; long-run numerical
+stability is unproven.
 
 ## Output and tracker contract
 

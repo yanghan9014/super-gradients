@@ -33,6 +33,52 @@ def test_probabilities_sum_to_objectness_and_board_is_unchanged():
     torch.testing.assert_close(scores[..., :6] + scores[..., 6:12], obj.sigmoid()*types[..., :6].softmax(-1))
 
 
+@pytest.mark.parametrize('identity', ['type', 'color'])
+def test_identity_predictions_do_not_change_assignment_quality_or_geometry_loss(identity):
+    torch.manual_seed(0)
+    decoded, raw = heads()(features())
+    raw = list(raw)
+    # Provide usable piece geometry so equality cannot pass on all-background or
+    # zero-quality assignments. Each box extends one stride around its anchor.
+    distribution = torch.full_like(raw[1], -20).reshape(*raw[1].shape[:2], 4, -1)
+    distribution[..., 1] = 20
+    raw[1] = distribution.flatten(-2)
+    raw[2] = raw[5][None, :, None, :].expand(2, -1, 9, -1).clone()
+    raw[0] = torch.zeros_like(raw[0], requires_grad=True)
+    raw[8] = torch.zeros_like(raw[8], requires_grad=True)
+    loss = criterion(assigner_multiply_by_pose_oks=True)
+    seen = []
+    handle = loss.assigner.register_forward_hook(
+        lambda module, args, kwargs, result: seen.append((kwargs['pred_scores'], result)),
+        with_kwargs=True,
+    )
+    try:
+        _, original_logs = loss((decoded, tuple(raw)), targets())
+        changed = list(raw)
+        if identity == 'type':
+            changed[0] = torch.cat((torch.randn_like(raw[0][..., :6]) * 8, raw[0][..., 6:7]), -1)
+        else:
+            changed[8] = torch.randn_like(raw[8]) * 8
+        _, changed_logs = loss((decoded, tuple(changed)), targets())
+    finally:
+        handle.remove()
+
+    original_scores, original = seen[0]
+    changed_scores, altered = seen[1]
+    assert not original_scores.requires_grad
+    torch.testing.assert_close(original_scores[..., :12], raw[9].detach().sigmoid().expand(-1, -1, 12))
+    torch.testing.assert_close(original_scores[..., 12], raw[0].detach()[..., 6].sigmoid())
+    torch.testing.assert_close(changed_scores, original_scores)
+    assert original.assigned_scores[..., :12].sum() > 0
+    assert original.assigned_scores[..., 12].sum() > 0
+    for name, value in vars(original).items():
+        if value is not None:
+            torch.testing.assert_close(getattr(altered, name), value)
+    # Identity still receives supervision; only assignment and geometry are independent.
+    assert not torch.isclose(changed_logs[0], original_logs[0])
+    torch.testing.assert_close(changed_logs[1:5], original_logs[1:5])
+
+
 @pytest.mark.parametrize('kind', ['bce', 'focal'])
 def test_quality_targets_and_weighted_identity_supervision_keep_board_loss(kind):
     loss = criterion(classification_loss_type=kind)

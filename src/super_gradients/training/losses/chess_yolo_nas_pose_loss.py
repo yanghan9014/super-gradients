@@ -573,11 +573,19 @@ class ChessYoloNASPoseLoss(nn.Module):
             "rotation_eligible_fraction": rotation_eligible.float().sum() / board_gt.sum().clamp(min=1),
         }
 
+        # Separate piece presence from identity when selecting anchors and computing
+        # assignment quality. Keep all 13 label columns for the existing targets.
+        if self.piece_objectness:
+            piece_scores = objectness_logits.detach().sigmoid().expand(-1, -1, self.board_class_id)
+            assignment_scores = torch.cat((piece_scores, pred_scores.detach()[..., 6:7].sigmoid()), dim=-1)
+        elif self.factorized_piece_color:
+            assignment_scores = chess_joint_scores(pred_scores.detach(), color_logits.detach())
+        else:
+            assignment_scores = pred_scores.detach().sigmoid()
+
         # label assignment
         assign_result = self.assigner(
-            pred_scores=(chess_joint_scores(pred_scores.detach(), color_logits.detach(),
-                                            objectness_logits.detach() if objectness_logits is not None else None)
-                         if self.factorized_piece_color else pred_scores.detach().sigmoid()),
+            pred_scores=assignment_scores,
             pred_bboxes=pred_bboxes.detach() * stride_tensor,
             pred_pose_coords=pred_pose_coords.detach(),
             anchor_points=anchor_points,
